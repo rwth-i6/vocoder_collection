@@ -37,8 +37,6 @@ class UnivNet(torch.nn.Module):
         self.lvc_blocks = torch.nn.ModuleList()
         cond_hop_length = 1
         for n in range(self.lvc_block_nums):
-            print(n)
-            print(upsample_ratios[n])
             cond_hop_length = cond_hop_length * upsample_ratios[n]
             lvcb = LVCBlock(
                 in_channels=inner_channels,
@@ -77,8 +75,6 @@ class UnivNet(torch.nn.Module):
 
         for n in range(self.lvc_block_nums):
             x = self.lvc_blocks[n](x, c)
-            print(n)
-            print(np.shape(x))
         # apply final layers
         for f in self.last_conv_layers:
             x = F.leaky_relu(x, LRELU_SLOPE)

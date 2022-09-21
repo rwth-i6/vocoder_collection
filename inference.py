@@ -11,8 +11,6 @@ from scipy.io.wavfile import write
 from meldataset import mel_spectrogram, MAX_WAV_VALUE, load_wav
 from generator import UnivNet as Generator
 from utils import HParam, AttrDict, build_env
-import sys
-sys.path.append("/u/schuemann/experiments/tts_asr_2021/recipe/")
 from returnn.datasets.util.feature_extraction import _get_audio_db_mel_filterbank
 h = None
 device = None
@@ -24,15 +22,6 @@ def load_checkpoint(filepath, device):
     checkpoint_dict = torch.load(filepath, map_location=device)
     print("Complete.")
     return checkpoint_dict
-
-
-def get_mel(x):
-    return mel_spectrogram(
-        x, hp.audio.filter_length, hp.audio.n_mel_channels,
-        hp.audio.sampling_rate, hp.audio.hop_length,
-        hp.audio.win_length, hp.audio.mel_fmin, None
-    )
-
 
 def scan_checkpoint(cp_dir, prefix):
     pattern = os.path.join(cp_dir, prefix + '*')
@@ -53,32 +42,27 @@ def inference(a, h, with_postnet=False):
     os.makedirs(a.output_dir, exist_ok=True)
 
     generator.eval()
-    #generator.remove_weight_norm()
     with torch.no_grad():
         for i, filename in enumerate(filelist):
             wav, sr = load_wav(os.path.join(a.input_wavs_dir, filename))
             wav = wav / MAX_WAV_VALUE
             wav = normalize(wav) * 0.95
             wav = torch.FloatTensor(wav)
-            #wav = wav.reshape((1, 1, wav.shape[0],)).to(device)
             wav = np.array(wav)
             mel = _get_audio_db_mel_filterbank(wav, h.sampling_rate, h.win_size, h.hop_size, h.num_mels,
                                                            h.fmin, h.fmax_for_loss)
             mel = np.expand_dims(mel,axis=0)
             mel = np.swapaxes(mel,1,2)
             mel = torch.tensor(mel)
-            print(np.shape(mel))
             noise = torch.randn([1,64, mel.shape[-1]]) 
-            #mel = np.swapaxes(mel, 0, 1)
             audio = generator.forward(noise, mel)
-            #audio = before_y_g_hat.reshape((before_y_g_hat.shape[2],))
             audio = audio * MAX_WAV_VALUE
             audio = audio.cpu().numpy().astype('int16')
             output_file = os.path.join(
                 a.output_dir,
                 os.path.splitext(filename)[0] + '_generated.wav'
             )
-            write(output_file, hp.audio.sampling_rate, audio)
+            write(output_file, h.sampling_rate, audio)
             print(output_file)
 
 
@@ -89,8 +73,7 @@ def main():
     parser.add_argument('--input_wavs_dir', default='test_files')
     parser.add_argument('--output_dir', default='generated_files')
     parser.add_argument('--checkpoint_file', required=True)
-    parser.add_argument('--config_inference', default='config_inference.yaml')
-    parser.add_argument('--config', default='config_c32.json')
+    parser.add_argument('--config', default='config_8200.json')
 
     args = parser.parse_args()
 
@@ -99,13 +82,8 @@ def main():
 
     json_config = json.loads(data)
     h = AttrDict(json_config)
-    
-    global hp
-    hp = HParam(args.config_inference)
-    with open(args.config, 'r') as f:
-        hp_str = ''.join(f.readlines())
-
-    torch.manual_seed(hp.train.seed)
+   
+    torch.manual_seed(h.seed)
     global device
     device = torch.device('cpu')
 

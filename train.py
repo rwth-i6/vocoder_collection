@@ -22,8 +22,6 @@ from discriminator import MultiPeriodDiscriminator, MultiResSpecDiscriminator
 from loss import feature_loss, generator_loss, discriminator_loss
 from utils import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
 from stft_loss import MultiResolutionSTFTLoss
-import sys
-sys.path.append("/u/schuemann/experiments/tts_asr_2021/recipe/")
 from returnn.datasets.util.feature_extraction import _get_audio_db_mel_filterbank
 torch.backends.cudnn.benchmark = True
 
@@ -43,6 +41,10 @@ def load_normal_data():
         return sequences, tags
 
 def train(rank, a, h):
+    # assert that segment lengths fit after upsampling (does not work in general)
+    feature_length = (h.segment_size//h.hop_size*h.sampling_rate)+1
+    sr = np.prod(h.sample_rates)
+    assert feature_length * sr >= h.segment_size
     if h.num_gpus > 1:
         init_process_group(backend=h.dist_config['dist_backend'], init_method=h.dist_config['dist_url'],
                            world_size=h.dist_config['world_size'] * h.num_gpus, rank=rank)
@@ -94,34 +96,11 @@ def train(rank, a, h):
 
     training_filelist, validation_filelist = get_dataset_filelist(a)
 
-    # load hdf features
-    hdf_input_data = h5py.File(
-        "/u/schuemann/experiments/tts_asr_2021/work/i6_private/users/schuemann/tts/hdf/ReturnnDumpHDFJob.ZMmXSWlaIvvb/output/data.hdf",
-        'r')
-    num_seqs = -1
-    hdf_inputs = hdf_input_data['inputs']
-    hdf_seq_tags = hdf_input_data['seqTags']
-    hdf_lengths = hdf_input_data['seqLengths']
-    sizes = None
-    if hdf_input_data.get('targets', {}).get('data', {}).get('sizes', None):
-        sizes = np.reshape(input_data['targets']['data']['sizes'], (-1, 2))
-
-    hdf_sequences = []
-    hdf_tags = []
-    offset = 0
-    for tag, length in zip(hdf_seq_tags, hdf_lengths):
-        tag = tag if isinstance(tag, str) else tag.decode()
-        in_data = hdf_inputs[offset:offset + length[0]]
-        hdf_sequences.append(in_data)
-        offset += length[0]
-        hdf_tags.append(tag)
-        if len(hdf_sequences) == num_seqs:
-            break
 
     trainset = MelDataset(training_filelist, h.segment_size, h.n_fft, h.num_mels,
                           h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, split=True, n_cache_reuse=0,
                           shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
-                          fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir, hdf_sequences=hdf_sequences, hdf_tags=hdf_tags)
+                          fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir)
 
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
 
@@ -131,16 +110,11 @@ def train(rank, a, h):
                               pin_memory=True,
                               drop_last=True)
     
-    # also split audio data for vailidation
     if rank == 0:
-        #validset = MelDataset(validation_filelist, h.segment_size, h.n_fft, h.num_mels,
-        #                      h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, False, False, n_cache_reuse=0,
-        #                      fmax_loss=h.fmax_for_loss, device=device, fine_tuning=a.fine_tuning,
-        #                      base_mels_path=a.input_mels_dir, hdf_sequences=hdf_sequences, hdf_tags=hdf_tags)
         validset = MelDataset(validation_filelist, h.segment_size, h.n_fft, h.num_mels,
                               h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, False, False, n_cache_reuse=0,
                               fmax_loss=h.fmax_for_loss, device=device, fine_tuning=a.fine_tuning,
-                              base_mels_path=a.input_mels_dir, hdf_sequences=hdf_sequences, hdf_tags=hdf_tags)
+                              base_mels_path=a.input_mels_dir)
         validation_loader = DataLoader(validset, num_workers=1, shuffle=True,
                                        sampler=None,
                                        batch_size=1,
@@ -172,24 +146,16 @@ def train(rank, a, h):
             y = y.unsqueeze(1)
 
             y_g_hat = generator(z, x)
-            #print("fake audio:")
-            #print(np.shape(y_g_hat))
-            #y_g_hat_mel = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate, 256,
-            #                              1024,
-            #                              h.fmin, h.fmax_for_loss)
             
             # need to pull tensor to cpu and then to gpu again: inefficient?
-            # might need to cut audio at the end due to not matching segment size
-            # approximate predicted fake audio as otherwise we cannot evaluate on full sequences in validation
+            # might need to cut audio at the end due to the fact that the predicted audio might be larger
             y_g_hat_mel = [] 
-            for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
+            for audio in y_g_hat[:,:,:y.size(2)].squeeze(1).detach().cpu().numpy():
                 single_mel = _get_audio_db_mel_filterbank(audio, h.sampling_rate, h.win_size, h.hop_size, h.num_mels,
                                                            h.fmin, h.fmax_for_loss)
                 y_g_hat_mel.append(single_mel)
             
             y_g_hat_mel = torch.tensor(y_g_hat_mel)
-            print(np.shape(y_g_hat_mel))
-            print(np.shape(y))
             y_g_hat_mel = np.swapaxes(y_g_hat_mel,1,2)
             # pull to gpu
             y_g_hat_mel = y_g_hat_mel.to("cuda:0")
@@ -213,17 +179,13 @@ def train(rank, a, h):
             # Generator
             optim_g.zero_grad()
 
-            # L1 Mel-Spectrogram Loss
-            #loss_mel = F.l1_loss(y_mel, y_g_hat_mel) * 45
-           
-            sc_loss, mag_loss = stft_loss(y_g_hat.squeeze(1), y[:, :, :y_g_hat.size(2)].squeeze(1))
-            #sc_loss, mag_loss = stft_loss(torch.nn.functional.pad(y_g_hat,(0,y.size(2),0,0,0,0))[:,:,:y.size(2)].squeeze(1), y.squeeze(1))
+            sc_loss, mag_loss = stft_loss(y_g_hat[:,:,:y.size(2)].squeeze(1), y.squeeze(1))
 
             loss_mel = h.lambda_aux * (sc_loss + mag_loss)  # STFT Loss
 
             if steps > h.disc_start_step:
-                y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(y, y_g_hat)
-                y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = msd(y, y_g_hat)
+                y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(y, y_g_hat[:,:,:y.size(2)])
+                y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = msd(y, y_g_hat[:,:,:y.size(2)])
                 loss_fm_f = feature_loss(fmap_f_r, fmap_f_g)
                 loss_fm_s = feature_loss(fmap_s_r, fmap_s_g)
                 loss_gen_f, losses_gen_f = generator_loss(y_df_hat_g)
@@ -239,7 +201,7 @@ def train(rank, a, h):
                 # STDOUT logging
                 if steps % a.stdout_interval == 0:
                     with torch.no_grad():
-                        mel_error = F.l1_loss(y_mel, y_g_hat_mel[:,:,:y_mel.size(2)]).item()
+                        mel_error = F.l1_loss(y_mel, y_g_hat_mel).item()
 
                     print('Steps : {:d}, Gen Loss Total : {:4.3f}, Mel-Spec. Error : {:4.3f}, s/b : {:4.3f}'.
                           format(steps, loss_gen_all, mel_error, time.time() - start_b))
@@ -272,33 +234,14 @@ def train(rank, a, h):
                         for j, batch in enumerate(validation_loader):
                             x, y, _, y_mel, z = batch
                             y_g_hat = generator(z.to(device), x.to(device))
-                            #print("input mel")
-                            #print(np.shape(x.to(device)))
-                            y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
-                            real_mel = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate,
-                                                          256, 1024,
-                                                          h.fmin, h.fmax_for_loss)
-                            #print("fake audio:")
-                            #print(np.shape(y_g_hat.squeeze(1).detach().cpu().numpy()))
-                            #print(np.shape(y_g_hat.squeeze(1)[:,:y.size(1)].detach().cpu().numpy()))
-                            #print("actual mel with fake audio")
-                            #print(np.shape(real_mel))
-                            #print("real audio")
-                            #print(np.shape(y))
-                            #print("my real mel")
-                            #print(np.shape(y_mel))
-                            #print("my fake mel")
-                            
                             y_g_hat_mel = []
-                            for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
+                            for audio in y_g_hat[:,:,:y.size(2)].squeeze(1).detach().cpu().numpy():
                                 single_mel = _get_audio_db_mel_filterbank(audio, h.sampling_rate, h.win_size, h.hop_size, h.num_mels,
                                                                           h.fmin, h.fmax_for_loss)
                                 y_g_hat_mel.append(single_mel)
                             y_g_hat_mel = torch.tensor(np.swapaxes(y_g_hat_mel,1,2))
-                            print(np.shape(y_g_hat_mel))
-                            print(np.shape(y))
                             y_g_hat_mel = y_g_hat_mel.to("cuda:0")
-                            val_err_tot += F.l1_loss(y_mel[:,:,:y_g_hat_mel.size(2)], y_g_hat_mel).item()
+                            val_err_tot += F.l1_loss(y_mel, y_g_hat_mel).item()
 
                             if j <= 4:
                                 if steps == 0:
@@ -306,9 +249,6 @@ def train(rank, a, h):
                                     sw.add_figure('gt/y_spec_{}'.format(j), plot_spectrogram(x[0]), steps)
 
                                 sw.add_audio('generated/y_hat_{}'.format(j), y_g_hat[0], steps, h.sampling_rate)
-                                #y_hat_spec = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels,
-                                #                             h.sampling_rate, h.hop_size, h.win_size,
-                                #                             h.fmin, h.fmax)
                                
                                 y_hat_spec = []
                                 for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
@@ -339,12 +279,12 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--group_name', default=None)
-    parser.add_argument('--input_wavs_dir', default='/work/asr3/rossenbach/schuemann/vocoder/UnivNet-pytorch-test/LJSpeech-1.1/wavs')
-    parser.add_argument('--input_mels_dir', default='/work/asr3/rossenbach/schuemann/vocoder/UnivNet-pytorch-test-full/ft_dataset')
-    parser.add_argument('--input_training_file', default='/work/asr3/rossenbach/schuemann/vocoder/UnivNet-pytorch-test-full/LJSpeech-1.1/training.txt')
-    parser.add_argument('--input_validation_file', default='/work/asr3/rossenbach/schuemann/vocoder/UnivNet-pytorch-test-full/LJSpeech-1.1/validation.txt')
-    parser.add_argument('--checkpoint_path', default='/work/asr3/rossenbach/schuemann/vocoder/UnivNet-pytorch-test-full/cp_hifigan')
-    parser.add_argument('--config', default='config_c32.json')
+    parser.add_argument('--input_wavs_dir', default=None) # path to wav directory for LJSpeech
+    parser.add_argument('--input_mels_dir', default='ft_dataset') # not used
+    parser.add_argument('--input_training_file', default='LJSpeech-1.1/training.txt')
+    parser.add_argument('--input_validation_file', default='LJSpeech-1.1/validation.txt')
+    parser.add_argument('--checkpoint_path', default=None) # path to where checkpoints should be saved
+    parser.add_argument('--config', default='config_univ.json')
     parser.add_argument('--training_epochs', default=3100, type=int)
     parser.add_argument('--stdout_interval', default=5, type=int)
     parser.add_argument('--checkpoint_interval', default=5000, type=int)
@@ -359,7 +299,7 @@ def main():
 
     json_config = json.loads(data)
     h = AttrDict(json_config)
-    build_env(a.config, 'config_c32.json', a.checkpoint_path)
+    build_env(a.config, 'config_univ.json', a.checkpoint_path)
 
     torch.manual_seed(h.seed)
     if torch.cuda.is_available():
