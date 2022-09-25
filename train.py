@@ -1,6 +1,3 @@
-import warnings
-
-warnings.simplefilter(action='ignore', category=FutureWarning)
 import itertools
 import numpy as np
 import h5py
@@ -16,34 +13,22 @@ import torch.multiprocessing as mp
 from torch.distributed import init_process_group
 from torch.nn.parallel import DistributedDataParallel
 from utils import AttrDict, build_env
-from meldataset import MelDataset, mel_spectrogram, get_dataset_filelist
+from meldataset import MelDataset, get_dataset_filelist, extract_features
 from generator import UnivNet
 from discriminator import MultiPeriodDiscriminator, MultiResSpecDiscriminator
 from loss import feature_loss, generator_loss, discriminator_loss
 from utils import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
 from stft_loss import MultiResolutionSTFTLoss
-from returnn.datasets.util.feature_extraction import _get_audio_db_mel_filterbank
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 torch.backends.cudnn.benchmark = True
 
-def load_normal_data():
-        sequences = []
-        tags = []
-        offset = 0
-        for tag, length in zip(seq_tags, lengths):
-            tag = tag if isinstance(tag, str) else tag.decode()
-            in_data = inputs[offset:offset + length[0]]
-            sequences.append(in_data)
-            offset += length[0]
-            tags.append(tag)
-            if len(sequences) == num_seqs:
-                break
-
-        return sequences, tags
 
 def train(rank, a, h):
     # assert that segment lengths fit after upsampling (does not work in general)
     feature_length = (h.segment_size//h.hop_size*h.sampling_rate)+1
-    sr = np.prod(h.sample_rates)
+    sr = np.prod(h.upsample_rates)
     assert feature_length * sr >= h.segment_size
     if h.num_gpus > 1:
         init_process_group(backend=h.dist_config['dist_backend'], init_method=h.dist_config['dist_url'],
@@ -96,11 +81,10 @@ def train(rank, a, h):
 
     training_filelist, validation_filelist = get_dataset_filelist(a)
 
-
     trainset = MelDataset(training_filelist, h.segment_size, h.n_fft, h.num_mels,
                           h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, split=True, n_cache_reuse=0,
                           shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
-                          fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir)
+                          fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir, features=a.features)
 
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
 
@@ -114,7 +98,7 @@ def train(rank, a, h):
         validset = MelDataset(validation_filelist, h.segment_size, h.n_fft, h.num_mels,
                               h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, False, False, n_cache_reuse=0,
                               fmax_loss=h.fmax_for_loss, device=device, fine_tuning=a.fine_tuning,
-                              base_mels_path=a.input_mels_dir)
+                              base_mels_path=a.input_mels_dir, features=a.features)
         validation_loader = DataLoader(validset, num_workers=1, shuffle=True,
                                        sampler=None,
                                        batch_size=1,
@@ -150,13 +134,13 @@ def train(rank, a, h):
             # need to pull tensor to cpu and then to gpu again: inefficient?
             # might need to cut audio at the end due to the fact that the predicted audio might be larger
             y_g_hat_mel = [] 
-            for audio in y_g_hat[:,:,:y.size(2)].squeeze(1).detach().cpu().numpy():
-                single_mel = _get_audio_db_mel_filterbank(audio, h.sampling_rate, h.win_size, h.hop_size, h.num_mels,
-                                                           h.fmin, h.fmax_for_loss)
+            for audio in y_g_hat[:, :, :y.size(2)].squeeze(1).detach().cpu().numpy():
+                single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_mels,
+                                              h.fmin, h.fmax_for_loss)
                 y_g_hat_mel.append(single_mel)
             
             y_g_hat_mel = torch.tensor(y_g_hat_mel)
-            y_g_hat_mel = np.swapaxes(y_g_hat_mel,1,2)
+            y_g_hat_mel = np.swapaxes(y_g_hat_mel, 1, 2)
             # pull to gpu
             y_g_hat_mel = y_g_hat_mel.to("cuda:0")
             if steps > h.disc_start_step:
@@ -179,13 +163,13 @@ def train(rank, a, h):
             # Generator
             optim_g.zero_grad()
 
-            sc_loss, mag_loss = stft_loss(y_g_hat[:,:,:y.size(2)].squeeze(1), y.squeeze(1))
+            sc_loss, mag_loss = stft_loss(y_g_hat[:, :, :y.size(2)].squeeze(1), y.squeeze(1))
 
             loss_mel = h.lambda_aux * (sc_loss + mag_loss)  # STFT Loss
 
             if steps > h.disc_start_step:
-                y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(y, y_g_hat[:,:,:y.size(2)])
-                y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = msd(y, y_g_hat[:,:,:y.size(2)])
+                y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(y, y_g_hat[:, :, :y.size(2)])
+                y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = msd(y, y_g_hat[:, :, :y.size(2)])
                 loss_fm_f = feature_loss(fmap_f_r, fmap_f_g)
                 loss_fm_s = feature_loss(fmap_s_r, fmap_s_g)
                 loss_gen_f, losses_gen_f = generator_loss(y_df_hat_g)
@@ -234,10 +218,12 @@ def train(rank, a, h):
                         for j, batch in enumerate(validation_loader):
                             x, y, _, y_mel, z = batch
                             y_g_hat = generator(z.to(device), x.to(device))
+                            y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
                             y_g_hat_mel = []
-                            for audio in y_g_hat[:,:,:y.size(2)].squeeze(1).detach().cpu().numpy():
-                                single_mel = _get_audio_db_mel_filterbank(audio, h.sampling_rate, h.win_size, h.hop_size, h.num_mels,
-                                                                          h.fmin, h.fmax_for_loss)
+                            for audio in y_g_hat[:,:,:y.size(1)].squeeze(1).detach().cpu().numpy():
+                                single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
+                                                              h.hop_size, h.num_mels,
+                                                              h.fmin, h.fmax_for_loss)
                                 y_g_hat_mel.append(single_mel)
                             y_g_hat_mel = torch.tensor(np.swapaxes(y_g_hat_mel,1,2))
                             y_g_hat_mel = y_g_hat_mel.to("cuda:0")
@@ -252,8 +238,9 @@ def train(rank, a, h):
                                
                                 y_hat_spec = []
                                 for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
-                                    single_mel = _get_audio_db_mel_filterbank(audio, h.sampling_rate, h.win_size, h.hop_size, h.num_mels,
-                                                                              h.fmin, h.fmax_for_loss)
+                                    single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
+                                                                  h.hop_size, h.num_mels,
+                                                                  h.fmin, h.fmax_for_loss)
                                     y_hat_spec.append(single_mel)
                                 y_hat_spec = torch.tensor(np.swapaxes(y_hat_spec,1,2))
                                 sw.add_figure('generated/y_hat_spec_{}'.format(j),
@@ -279,19 +266,23 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--group_name', default=None)
-    parser.add_argument('--input_wavs_dir', default=None) # path to wav directory for LJSpeech
-    parser.add_argument('--input_mels_dir', default='ft_dataset') # not used
-    parser.add_argument('--input_training_file', default='LJSpeech-1.1/training.txt')
-    parser.add_argument('--input_validation_file', default='LJSpeech-1.1/validation.txt')
-    parser.add_argument('--checkpoint_path', default=None) # path to where checkpoints should be saved
-    parser.add_argument('--config', default='config_univ.json')
+    parser.add_argument('--input_wavs_dir', default=None, help='path to WAV directory for LJSpeech data')
+    parser.add_argument('--input_mels_dir', default=None, help='path to dataset for finetuning data') 
+    parser.add_argument('--input_training_file', default=None,
+                        help='path to LJSpeech training file')
+    parser.add_argument('--input_validation_file', default=None,
+                        help='path to LJSpeech validation  file')
+    parser.add_argument('--checkpoint_path', default=None, help='path to where checkpoints should be saved') 
+    parser.add_argument('--config', default='config_univ.json', help='path to config file')
     parser.add_argument('--training_epochs', default=3100, type=int)
     parser.add_argument('--stdout_interval', default=5, type=int)
     parser.add_argument('--checkpoint_interval', default=5000, type=int)
     parser.add_argument('--summary_interval', default=100, type=int)
     parser.add_argument('--validation_interval', default=1000, type=int)
     parser.add_argument('--fine_tuning', default=False, type=bool)
-
+    parser.add_argument('--features', default='db_mel_filterbank',
+                        help='choose features from "mfcc", "log_mel_filterbank", "log_log_mel_filterbank", '
+                             '"db_mel_filterbank", "linear_spectrogram"')
     a = parser.parse_args()
 
     with open(a.config) as f:
