@@ -19,14 +19,13 @@
     "lvc_conv_size": 3,
     "dropout": 0.0,
 
-
     "segment_size": 8200,
-    "num_mels": 80,
+    "num_ff": 80,
     "num_freq": 1025,
-    "n_fft": 1024,
     "hop_size": 0.0125,
     "win_size": 0.05,
-
+    "num_mels": 128,
+    "center": true,
     "sampling_rate": 16000,
 
     "fmin": 60,

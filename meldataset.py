@@ -8,8 +8,9 @@ from librosa.util import normalize
 from scipy.io.wavfile import read
 from librosa.filters import mel as librosa_mel_fn
 import sys
-sys.path.append("/u/schuemann/experiments/tts_asr_2021/recipe/")
-from returnn.datasets.util.feature_extraction import _get_audio_db_mel_filterbank, _get_audio_features_mfcc, _get_audio_log_mel_filterbank, _get_audio_log_log_mel_filterbank, _get_audio_linear_spectrogram
+sys.path.append("/u/schuemann/experiments/tts_asr_2021/recipe/returnn_new")
+from returnn.datasets.util.feature_extraction import _get_audio_db_mel_filterbank, _get_audio_features_mfcc, \
+    _get_audio_log_mel_filterbank, _get_audio_log_log_mel_filterbank, _get_audio_linear_spectrogram
 MAX_WAV_VALUE = 32768.0
 
 
@@ -48,18 +49,17 @@ mel_basis = {}
 hann_window = {}
 
 
-def extract_features(feature_name, audio, sr, win_size, hop_size, num_mels, f_min, f_max):
-    print("Extracting features: {}".format(feature_name))
+def extract_features(feature_name, audio, sr, win_size, hop_size, num_ff, f_min, f_max, num_mels, center):
     if feature_name == "mfcc":
-        feature_data = _get_audio_features_mfcc(audio, sr, win_size, hop_size, num_mels, fmin=f_min, fmax=f_max)
+        feature_data = _get_audio_features_mfcc(audio, sr, win_size, hop_size, num_ff, num_mels, f_min, f_max, center)
     elif feature_name == "log_mel_filterbank":
-        feature_data = _get_audio_log_mel_filterbank(audio, sr, win_size, hop_size, num_mels, fmin=f_min, fmax=f_max)
+        feature_data = _get_audio_log_mel_filterbank(audio, sr, win_size, hop_size, num_ff)
     elif feature_name == "log_log_mel_filterbank":
-        feature_data = _get_audio_log_log_mel_filterbank(audio, sr, win_size, hop_size, num_mels, fmin=f_min, fmax=f_max)
+        feature_data = _get_audio_log_log_mel_filterbank(audio, sr, win_size, hop_size, num_ff)
     elif feature_name == "db_mel_filterbank":
-        feature_data = _get_audio_db_mel_filterbank(audio, sr, win_size, hop_size, num_mels, fmin=f_min, fmax=f_max)
+        feature_data = _get_audio_db_mel_filterbank(audio, sr, win_size, hop_size, num_ff, f_min, f_max, center)
     elif feature_name  == "linear_spectrogram":
-        feature_data = _get_audio_linear_spectrogram(audio, sr, win_size, hop_size, num_mels, fmin=f_min, fmax=f_max)
+        feature_data = _get_audio_linear_spectrogram(audio, sr, win_size, hop_size, num_ff, center)
     return feature_data
 
 
@@ -75,9 +75,10 @@ def get_dataset_filelist(a):
 
 
 class MelDataset(torch.utils.data.Dataset):
-    def __init__(self, training_files, segment_size, n_fft, num_mels,
-                 hop_size, win_size, sampling_rate,  fmin, fmax, split=True, shuffle=True, n_cache_reuse=1,
-                 device=None, fmax_loss=None, fine_tuning=False, base_mels_path=None, features="db_mel_filterbank"):
+    def __init__(self, training_files, segment_size, num_ff,
+                 hop_size, win_size, sampling_rate,  fmin=60, fmax=7600, split=True, shuffle=True,
+                 n_cache_reuse=1, device=None, fmax_loss=None, fine_tuning=False, base_mels_path=None,
+                 features="db_mel_filterbank", center=False, num_mels=128):
         self.audio_files = training_files
         random.seed(1234)
         if shuffle:
@@ -85,13 +86,14 @@ class MelDataset(torch.utils.data.Dataset):
         self.segment_size = segment_size
         self.sampling_rate = sampling_rate
         self.split = split
-        self.n_fft = n_fft
         self.num_mels = num_mels
         self.hop_size = hop_size
         self.win_size = win_size
         self.fmin = fmin
         self.fmax = fmax
         self.fmax_loss = fmax_loss
+        self.num_ff = num_ff
+        self.center = center
         self.cached_wav = None
         self.n_cache_reuse = n_cache_reuse
         self._cache_ref_count = 0
@@ -129,9 +131,10 @@ class MelDataset(torch.utils.data.Dataset):
                     audio = torch.nn.functional.pad(audio, (0, self.segment_size - audio.size(1)), 'constant')
             
             # compute mels for training
-            mel = extract_features(self.features, np.array(audio.squeeze()), self.sampling_rate, self.win_size, self.hop_size, self.num_mels, self.fmin, self.fmax)
-            mel = np.swapaxes(mel,0,1)
-            mel = np.expand_dims(mel,axis=0)
+            mel = extract_features(self.features, np.array(audio.squeeze()), self.sampling_rate, self.win_size,
+                                   self.hop_size, self.num_ff, self.fmin, self.fmax, self.num_mels, self.center)
+            mel = np.swapaxes(mel, 0, 1)
+            mel = np.expand_dims(mel, axis=0)
             
         else:
             mel = np.load(
@@ -153,9 +156,10 @@ class MelDataset(torch.utils.data.Dataset):
                     audio = torch.nn.functional.pad(audio, (0, self.segment_size - audio.size(1)), 'constant')
 
         # compute mels for loss computation
-        mel_loss = extract_features(self.features, np.array(audio.squeeze()), self.sampling_rate, self.win_size, self.hop_size, self.num_mels, self.fmin, self.fmax_loss)
-        mel_loss = np.swapaxes(mel_loss,0,1)
-        mel_loss = np.expand_dims(mel_loss,axis=0)
+        mel_loss = extract_features(self.features, np.array(audio.squeeze()), self.sampling_rate, self.win_size,
+                                    self.hop_size, self.num_ff, self.fmin, self.fmax_loss, self.num_mels, self.center)
+        mel_loss = np.swapaxes(mel_loss, 0, 1)
+        mel_loss = np.expand_dims(mel_loss, axis=0)
 
         # compute noise based on mel shape for generation of fake audio
         noise = torch.randn([64, mel.shape[-1]])

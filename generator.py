@@ -14,7 +14,7 @@ class UnivNet(torch.nn.Module):
         in_channels = h.cond_in_channels
         out_channels = h.out_channels
         inner_channels = h.cg_channels
-        cond_channels = h.num_mels
+        cond_channels = h.num_ff
         upsample_ratios = h.upsample_rates
         lvc_layers_each_block = h.num_lvc_blocks
         lvc_kernel_size = h.lvc_kernels

@@ -81,10 +81,11 @@ def train(rank, a, h):
 
     training_filelist, validation_filelist = get_dataset_filelist(a)
 
-    trainset = MelDataset(training_filelist, h.segment_size, h.n_fft, h.num_mels,
+    trainset = MelDataset(training_filelist, h.segment_size, h.num_ff,
                           h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, split=True, n_cache_reuse=0,
                           shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
-                          fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir, features=a.features)
+                          fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir, features=a.features,
+                          num_mels=h.num_mels, center=h.center)
 
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
 
@@ -95,10 +96,11 @@ def train(rank, a, h):
                               drop_last=True)
     
     if rank == 0:
-        validset = MelDataset(validation_filelist, h.segment_size, h.n_fft, h.num_mels,
+        validset = MelDataset(validation_filelist, h.segment_size, h.num_ff,
                               h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, False, False, n_cache_reuse=0,
                               fmax_loss=h.fmax_for_loss, device=device, fine_tuning=a.fine_tuning,
-                              base_mels_path=a.input_mels_dir, features=a.features)
+                              base_mels_path=a.input_mels_dir, features=a.features, num_mels=h.num_mels,
+                              center=h.center)
         validation_loader = DataLoader(validset, num_workers=1, shuffle=True,
                                        sampler=None,
                                        batch_size=1,
@@ -111,6 +113,9 @@ def train(rank, a, h):
     mpd.train()
     msd.train()
     stft_loss = MultiResolutionSTFTLoss()
+
+    print("Training with {} features".format(a.features))
+
     for epoch in range(max(0, last_epoch), a.training_epochs):
         if rank == 0:
             start = time.time()
@@ -135,8 +140,8 @@ def train(rank, a, h):
             # might need to cut audio at the end due to the fact that the predicted audio might be larger
             y_g_hat_mel = [] 
             for audio in y_g_hat[:, :, :y.size(2)].squeeze(1).detach().cpu().numpy():
-                single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_mels,
-                                              h.fmin, h.fmax_for_loss)
+                single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_ff,
+                                              h.fmin, h.fmax_for_loss, h.num_mels, h.center)
                 y_g_hat_mel.append(single_mel)
             
             y_g_hat_mel = torch.tensor(y_g_hat_mel)
@@ -222,8 +227,8 @@ def train(rank, a, h):
                             y_g_hat_mel = []
                             for audio in y_g_hat[:,:,:y.size(1)].squeeze(1).detach().cpu().numpy():
                                 single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
-                                                              h.hop_size, h.num_mels,
-                                                              h.fmin, h.fmax_for_loss)
+                                                              h.hop_size, h.num_ff,
+                                                              h.fmin, h.fmax_for_loss, h.num_mels, h.center)
                                 y_g_hat_mel.append(single_mel)
                             y_g_hat_mel = torch.tensor(np.swapaxes(y_g_hat_mel,1,2))
                             y_g_hat_mel = y_g_hat_mel.to("cuda:0")
@@ -239,8 +244,8 @@ def train(rank, a, h):
                                 y_hat_spec = []
                                 for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
                                     single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
-                                                                  h.hop_size, h.num_mels,
-                                                                  h.fmin, h.fmax_for_loss)
+                                                                  h.hop_size, h.num_ff,
+                                                                  h.fmin, h.fmax_for_loss, h.num_mels, h.center)
                                     y_hat_spec.append(single_mel)
                                 y_hat_spec = torch.tensor(np.swapaxes(y_hat_spec,1,2))
                                 sw.add_figure('generated/y_hat_spec_{}'.format(j),
