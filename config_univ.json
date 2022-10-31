@@ -1,5 +1,5 @@
 {
-    "num_gpus": 0,
+    "num_gpus": 2,
     "batch_size": 16,
     "learning_rate": 0.0002,
     "adam_b1": 0.8,
@@ -19,15 +19,15 @@
     "lvc_conv_size": 3,
     "dropout": 0.0,
 
-    "segment_size": 8200,
+    "segment_size": 8000,
     "num_ff": 80,
     "num_freq": 1025,
     "hop_size": 0.0125,
     "win_size": 0.05,
     "num_mels": 128,
-    "center": true,
+    "center": false,
     "sampling_rate": 16000,
-
+    "min_amp": 1e-10,
     "fmin": 60,
     "fmax": 7600,
     "fmax_for_loss": 7600,
