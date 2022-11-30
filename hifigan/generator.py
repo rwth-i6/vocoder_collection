@@ -113,7 +113,7 @@ class Postnet(torch.nn.Module):
         Returns:
             Tensor: Batch of padded output tensor. (B, odim, Tmax).
         """
-        for postnet in self.postnet:
+        for i, postnet in enumerate(self.postnet):
             xs = postnet(xs)
         return xs
 
@@ -190,7 +190,7 @@ class Generator(nn.Module):
     def __init__(self, in_channels, out_channels=1, bias=False,
                  num_layers=20, num_stacks=2, kernel_size=3,
                  residual_channels=128, gate_channels=128, skip_out_channels=128,
-                 postnet_layers=12, postnet_filts=32, use_batch_norm=False, postnet_dropout_rate=0.5):
+                 postnet_layers=12, postnet_filts=31, use_batch_norm=False, postnet_dropout_rate=0.5):
         super().__init__()
         assert num_layers % num_stacks == 0
         num_layers_per_stack = num_layers // num_stacks

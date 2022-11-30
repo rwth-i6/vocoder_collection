@@ -11,7 +11,7 @@ import torch
 import soundfile as sf
 from librosa.util import normalize
 from scipy.io.wavfile import write
-from meldataset import MAX_WAV_VALUE, load_wav
+from meldataset import MAX_WAV_VALUE
 from generator import UnivNet as Generator
 from utils import HParam, AttrDict, build_env
 from meldataset import extract_features
