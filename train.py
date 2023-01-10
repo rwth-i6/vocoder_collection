@@ -4,7 +4,6 @@ import os
 import time
 import argparse
 import json
-import logging
 import torch
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
@@ -13,7 +12,7 @@ import torch.multiprocessing as mp
 from torch.distributed import init_process_group
 from torch.nn.parallel import DistributedDataParallel
 from utils import AttrDict, build_env
-from meldataset import MelDataset, extract_features
+from meldataset_full import MelDataset, get_dataset_filelist, extract_features
 from generator import UnivNet
 from discriminator import MultiPeriodDiscriminator, MultiResSpecDiscriminator
 from loss import feature_loss, generator_loss, discriminator_loss
@@ -80,26 +79,28 @@ def train(rank, a, h):
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=h.lr_decay, last_epoch=last_epoch)
     scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=h.lr_decay, last_epoch=last_epoch)
 
-    trainset = MelDataset(a.target_audio_form, a.input_training_file, h.segment_size, h.num_ff,
+    training_filelist, validation_filelist = get_dataset_filelist(a, a.target_audio_form)
+
+    trainset = MelDataset(a.target_audio_form, training_filelist, h.segment_size, h.num_ff,
                           h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, split=True, n_cache_reuse=0,
                           shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
                           fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir, features=a.features,
-                          num_mels=h.num_mels, center=h.center, min_amp=h.min_amp, path=a.input_audio_dir)
+                          num_mels=h.num_mels, center=h.center, min_amp=h.min_amp)
 
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
 
-    train_loader = DataLoader(trainset, num_workers=h.num_workers, shuffle=False,#h.num_workers
+    train_loader = DataLoader(trainset, num_workers=h.num_workers, shuffle=False,
                               sampler=train_sampler,
                               batch_size=h.batch_size,
                               pin_memory=True,
                               drop_last=True)
     
     if rank == 0:
-        validset = MelDataset(a.target_audio_form, a.input_validation_file, h.segment_size, h.num_ff,
+        validset = MelDataset(a.target_audio_form, validation_filelist, h.segment_size, h.num_ff,
                               h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, False, False, n_cache_reuse=0,
                               fmax_loss=h.fmax_for_loss, device=device, fine_tuning=a.fine_tuning,
                               base_mels_path=a.input_mels_dir, features=a.features, num_mels=h.num_mels,
-                              center=h.center, min_amp=h.min_amp, path=a.input_audio_dir)
+                              center=h.center, min_amp=h.min_amp)
         validation_loader = DataLoader(validset, num_workers=1, shuffle=False,
                                        sampler=None,
                                        batch_size=1,
@@ -126,7 +127,7 @@ def train(rank, a, h):
         for i, batch in enumerate(train_loader):
             if rank == 0:
                 start_b = time.time()
-            x, y, x_tag, y_mel, z = batch
+            x, y, _, y_mel, z = batch
             x = torch.autograd.Variable(x.to(device, non_blocking=True))
             y = torch.autograd.Variable(y.to(device, non_blocking=True))
             y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
@@ -134,14 +135,13 @@ def train(rank, a, h):
             y = y.unsqueeze(1)
 
             y_g_hat = generator(z, x)
-            logging.error("in training tag:")
-            logging.error(x_tag)
+            
             # need to pull tensor to cpu and then to gpu again: inefficient?
             # might need to cut audio at the end due to the fact that the predicted audio might be larger
             y_g_hat_mel = [] 
             for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
                 single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_ff,
-                                              h.fmin, h.fmax_for_loss, h.num_mels, h.center, h.min_amp)
+                                              h.fmin, h.fmax_for_loss, h.num_mels, h.center, h.min_amp, peak_norm=False, preemphasis=0.97)
                 y_g_hat_mel.append(single_mel)
             
             y_g_hat_mel = torch.tensor(y_g_hat_mel)
@@ -228,7 +228,7 @@ def train(rank, a, h):
                             for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
                                 single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
                                                               h.hop_size, h.num_ff, h.fmin, h.fmax_for_loss, h.num_mels,
-                                                              h.center, h.min_amp)
+                                                              h.center, h.min_amp, peak_norm=False, preemphasis=0.97)
                                 y_g_hat_mel.append(single_mel)
                             y_g_hat_mel = torch.tensor(np.swapaxes(y_g_hat_mel, 1, 2))
                             y_g_hat_mel = y_g_hat_mel.to("cuda:0")
@@ -245,7 +245,7 @@ def train(rank, a, h):
                                 for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
                                     single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
                                                                   h.hop_size, h.num_ff, h.fmin, h.fmax_for_loss,
-                                                                  h.num_mels, h.center, h.min_amp)
+                                                                  h.num_mels, h.center, h.min_amp, peak_norm=False, preemphasis=0.97)
                                     y_hat_spec.append(single_mel)
                                 y_hat_spec = torch.tensor(np.swapaxes(y_hat_spec, 1, 2))
                                 sw.add_figure('generated/y_hat_spec_{}'.format(j),

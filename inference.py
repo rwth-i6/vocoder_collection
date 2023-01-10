@@ -4,6 +4,7 @@ import glob
 import sys
 import numpy as np
 import os
+import h5py
 import argparse
 import json
 from scipy.io.wavfile import read
@@ -11,10 +12,9 @@ import torch
 import soundfile as sf
 from librosa.util import normalize
 from scipy.io.wavfile import write
-from meldataset import MAX_WAV_VALUE
+from meldataset import MAX_WAV_VALUE, extract_features
 from generator import UnivNet as Generator
 from utils import HParam, AttrDict, build_env
-from meldataset import extract_features
 sys.path.append("/u/schuemann/experiments/tts_asr_2021/recipe/returnn_new")
 h = None
 device = None
@@ -34,6 +34,26 @@ def scan_checkpoint(cp_dir, prefix):
         return ''
     return sorted(cp_list)[-1]
 
+def load_normal_data(hdf):
+    input_data = h5py.File(hdf, "r")
+    num_seqs = -1
+    inputs = input_data['inputs']
+    seq_tags = input_data['seqTags']
+    lengths = input_data['seqLengths']
+    sizes = None
+
+    sequences = []
+    tags = []
+    offset = 0
+    for tag, length in zip(seq_tags, lengths):
+        tag = tag if isinstance(tag, str) else tag.decode()
+        in_data = inputs[offset:offset + length[0]]
+        sequences.append(in_data)
+        offset += length[0]
+        tags.append(tag)
+        if len(sequences) == num_seqs:
+            break
+    return sequences, tags
 
 def inference(a, h, with_postnet=False):
     generator = Generator(h).to(device)
@@ -41,33 +61,57 @@ def inference(a, h, with_postnet=False):
     state_dict_g = load_checkpoint(a.checkpoint_file, device)
     generator.load_state_dict(state_dict_g['generator'])
 
-    filelist = os.listdir(a.input_wavs_dir)
 
     os.makedirs(a.output_dir, exist_ok=True)
 
     generator.eval()
-    with torch.no_grad():
-        for i, filename in enumerate(filelist):
-            audio, sr = sf.read(os.path.join(a.input_wavs_dir, filename))
-            audio = audio / MAX_WAV_VALUE
-            audio = normalize(audio) * 0.95
-            audio = torch.FloatTensor(audio)
-            audio = np.array(audio)
-            mel = extract_features(a.features, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_ff,
-                                   h.fmin, h.fmax_for_loss, h.num_mels, h.center, h.min_amp)
-            mel = np.expand_dims(mel, axis=0)
-            mel = np.swapaxes(mel, 1, 2)
-            mel = torch.tensor(mel)
-            noise = torch.randn([1, 64, mel.shape[-1]])
-            audio = generator.forward(noise, mel)
-            audio = audio * MAX_WAV_VALUE
-            audio = audio.cpu().numpy().astype('int16')
-            output_file = os.path.join(
-                a.output_dir,
-                os.path.splitext(filename)[0] + a.audio_form
-            )
-            write(output_file, h.sampling_rate, audio)
-            print(output_file)
+    
+    if a.hdf:
+        sequences, tags = load_normal_data(a.hdf)
+        with torch.no_grad():
+            for mel,tag in zip(sequences,tags): 
+                print(np.shape(mel))
+                mel = np.expand_dims(mel, axis=0)
+                mel = np.swapaxes(mel, 1, 2)
+                mel = torch.tensor(mel)
+                noise = torch.randn([1, 64, mel.shape[-1]])
+                audio = generator.forward(noise, mel)
+                if a.audio_form == ".wav":
+                    audio = audio * MAX_WAV_VALUE
+                audio = audio.cpu().numpy().astype('int16')
+                output_file = os.path.join(
+                    a.output_dir,
+                    tag.split("/")[-1] + a.audio_form
+                )
+                write(output_file, h.sampling_rate, audio)
+                print(output_file)
+    else:
+        filelist = os.listdir(a.input_wavs_dir)
+        with torch.no_grad():
+            for i, filename in enumerate(filelist):
+                audio, sr = sf.read(os.path.join(a.input_wavs_dir, filename))
+                if a.audio_form == ".wav":
+                    audio = audio / MAX_WAV_VALUE
+                audio = normalize(audio) * 0.95
+                audio = torch.FloatTensor(audio)
+                audio = np.array(audio)
+
+                mel = extract_features(a.features, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_ff,
+                                       h.fmin, h.fmax_for_loss, h.num_mels, h.center, h.min_amp, peak_norm=False, preemphasis=0.97)
+                mel = np.expand_dims(mel, axis=0)
+                mel = np.swapaxes(mel, 1, 2)
+                mel = torch.tensor(mel)
+                noise = torch.randn([1, 64, mel.shape[-1]])
+                audio = generator.forward(noise, mel)
+                if a.audio_form == ".wav":
+                    audio = audio * MAX_WAV_VALUE
+                audio = audio.cpu().numpy().astype('int16')
+                output_file = os.path.join(
+                    a.output_dir,
+                    os.path.splitext(filename)[0] + a.audio_form
+                )
+                write(output_file, h.sampling_rate, audio)
+                print(output_file)
 
 
 def main():
@@ -82,7 +126,8 @@ def main():
                         help='choose features from "mfcc", "log_mel_filterbank", "log_log_mel_filterbank", '
                              '"db_mel_filterbank", "linear_spectrogram"')
     parser.add_argument('--audio_form', default='.wav', help="choose audio representation to safe the "
-                                                                    "audio data (wav,ogg...)")
+                                                             "audio data (wav,ogg...)")
+    parser.add_argument('--hdf', default=None, help="choose hdf as mel input instead")
     args = parser.parse_args()
 
     with open(args.config) as f:
