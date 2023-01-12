@@ -19,18 +19,32 @@
     "lvc_conv_size": 3,
     "dropout": 0.0,
 
+
     "segment_size": 8000,
     "num_ff": 80,
     "num_freq": 1025,
     "hop_size": 0.0125,
     "win_size": 0.05,
-    "num_mels": 128,
+    "num_mels": null,
     "center": false,
     "sampling_rate": 16000,
     "min_amp": 1e-10,
     "fmin": 60,
     "fmax": 7600,
     "fmax_for_loss": 7600,
+    "with_delta": false,
+    "norm_mean": -76.49054107666015,
+    "norm_std_dev": 30.89699692930349,
+    "random_permute" : null,
+    "random_state": null,
+    "raw_ogg_opts": null,
+    "pre_process": null,
+    "post_process": null,
+    "num_channels": null,
+    "peak_norm": true,
+    "preemphasis": null,
+    "join_frames": null,
+
 
     "num_workers": 4,
 

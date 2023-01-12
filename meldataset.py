@@ -8,8 +8,7 @@ import numpy as np
 from librosa.util import normalize
 import sys
 sys.path.append("/u/schuemann/experiments/tts_asr_2021/recipe/returnn_new")
-from returnn.datasets.util.feature_extraction import ExtractAudioFeatures, _get_audio_db_mel_filterbank, _get_audio_features_mfcc, \
-    _get_audio_log_mel_filterbank, _get_audio_log_log_mel_filterbank, _get_audio_linear_spectrogram
+from returnn.datasets.util.feature_extraction import ExtractAudioFeatures
 MAX_WAV_VALUE = 32768.0
 
 
@@ -49,20 +48,37 @@ hann_window = {}
 
 
 def extract_features(feature_name, audio, sr, win_size, hop_size, num_ff, f_min, f_max, num_mels, center,
-                     min_amp, with_delta=False, norm_mean=None, norm_std_dev=None, random_permute=None, random_state=None, raw_ogg_opts=None, pre_process=None, post_process=None, num_channels=None,
+                     min_amp, with_delta=False, norm_mean=None, norm_std_dev=None, random_permute=None,
+                     random_state=None, raw_ogg_opts=None, pre_process=None, post_process=None, num_channels=None,
                      peak_norm=True, preemphasis=None, join_frames=None):
-    # calculate padding length and pad audio
+
+    # calculate padding length and pad audio such that features fit to audio in training/validation
     pad_hop = (sr * hop_size)
     pad_ff = (sr * win_size)
     audio = torch.tensor(audio).unsqueeze(0).unsqueeze(0)
     audio = torch.nn.functional.pad(audio, (int((pad_ff-pad_hop)/2), int((pad_ff-pad_hop)/2)), mode='reflect')
     audio = audio.squeeze(0).squeeze(0)
     audio = np.array(audio)
-    feature_options = {"fmin":f_min, "fmax":f_max, "min_amp":min_amp, "center": center}
-    Features = ExtractAudioFeatures(win_size, hop_size, num_ff, with_delta, norm_mean, norm_std_dev, feature_name, feature_options, random_permute, random_state, raw_ogg_opts,
+
+    # add extra feature options and calculate features, extra feature options that are not wanted need to be kept as default option None
+    feature_options = {}
+    if center is not None:
+        feature_options.update({"center": center})
+    if min_amp is not None:
+        feature_options.update({"min_amp": min_amp})
+    if f_min is not None:
+        feature_options.update({"fmin": f_min})
+    if f_max is not None:
+        feature_options.update({"fmax": f_max})
+    if num_mels is not None:
+        feature_options.update({"n_mels": num_mels})   
+
+    Features = ExtractAudioFeatures(win_size, hop_size, num_ff, with_delta, norm_mean, norm_std_dev, feature_name,
+                                    feature_options, random_permute, random_state, raw_ogg_opts,
                                     pre_process, post_process, sr, num_channels, peak_norm, preemphasis, join_frames)
     feature_data = Features.get_audio_features(audio, sr)
     return feature_data
+
 
 def get_dataset_filelist(a, audio_form):
     with open(a.input_training_file, 'r', encoding='utf-8') as fi:
@@ -79,8 +95,13 @@ class MelDataset(torch.utils.data.Dataset):
     def __init__(self, audio_form, training_files, segment_size, num_ff,
                  hop_size, win_size, sampling_rate,  fmin=60, fmax=7600, split=True, shuffle=True,
                  n_cache_reuse=1, device=None, fmax_loss=None, fine_tuning=False, base_mels_path=None,
-                 features="db_mel_filterbank", center=False, num_mels=128, min_amp=1e-10):
+                 features="db_mel_filterbank", center=False, num_mels=128, min_amp=1e-10, with_delta=False,
+                 norm_mean=None, norm_std_dev=None, random_permute=None, random_state=None, raw_ogg_opts=None,
+                 pre_process=None, post_process=None, num_channels=None, peak_norm=True, preemphasis=None,
+                 join_frames=None):
+
         self.audio_files = training_files
+        # shuffle audio based on random seed if shuffle=True
         random.seed(1234)
         if shuffle:
             random.shuffle(self.audio_files)
@@ -104,6 +125,18 @@ class MelDataset(torch.utils.data.Dataset):
         self.base_mels_path = base_mels_path
         self.features = features
         self.min_amp = min_amp
+        self.with_delta = with_delta
+        self.norm_mean = norm_mean
+        self.norm_std_dev = norm_std_dev
+        self.random_permute = random_permute
+        self.random_state = random_state
+        self.raw_ogg_opts = raw_ogg_opts
+        self.pre_process = pre_process
+        self.post_process = post_process
+        self.num_channels = num_channels
+        self.peak_norm = peak_norm
+        self.preemphasis = preemphasis
+        self.join_frames = join_frames
 
     def __getitem__(self, index):
         filename = self.audio_files[index]
@@ -134,7 +167,10 @@ class MelDataset(torch.utils.data.Dataset):
             # compute mels for training
             mel = extract_features(self.features, np.array(audio.squeeze()), self.sampling_rate, self.win_size,
                                    self.hop_size, self.num_ff, self.fmin, self.fmax, self.num_mels, self.center,
-                                   self.min_amp, peak_norm=False, preemphasis=0.97)
+                                   self.min_amp, self.with_delta, self.norm_mean, self.norm_std_dev,
+                                   self.random_permute, self.random_state, self.raw_ogg_opts, self.pre_process,
+                                   self.post_process, self.num_channels, self.peak_norm, self.preemphasis,
+                                   self.join_frames)
             mel = np.swapaxes(mel, 0, 1)
             mel = np.expand_dims(mel, axis=0)
             
@@ -160,7 +196,11 @@ class MelDataset(torch.utils.data.Dataset):
         # compute mels for loss computation
         mel_loss = extract_features(self.features, np.array(audio.squeeze()), self.sampling_rate, self.win_size,
                                     self.hop_size, self.num_ff, self.fmin, self.fmax_loss, self.num_mels, self.center,
-                                    self.min_amp, peak_norm=False, preemphasis=0.97)
+                                    self.min_amp, self.with_delta, self.norm_mean, self.norm_std_dev,
+                                    self.random_permute, self.random_state, self.raw_ogg_opts, self.pre_process,
+                                    self.post_process, self.num_channels, self.peak_norm, self.preemphasis,
+                                    self.join_frames)
+
         mel_loss = np.swapaxes(mel_loss, 0, 1)
         mel_loss = np.expand_dims(mel_loss, axis=0)
 

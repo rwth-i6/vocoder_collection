@@ -34,6 +34,7 @@ def scan_checkpoint(cp_dir, prefix):
         return ''
     return sorted(cp_list)[-1]
 
+# load hdf data
 def load_normal_data(hdf):
     input_data = h5py.File(hdf, "r")
     num_seqs = -1
@@ -61,23 +62,24 @@ def inference(a, h, with_postnet=False):
     state_dict_g = load_checkpoint(a.checkpoint_file, device)
     generator.load_state_dict(state_dict_g['generator'])
 
-
     os.makedirs(a.output_dir, exist_ok=True)
 
     generator.eval()
+
+    # Generate audio from mel spectrograms saved in hdf file. 
+    # The generated filename will be the tag of the sequence. (only works correctly for librispeech as of now)
     
     if a.hdf:
         sequences, tags = load_normal_data(a.hdf)
         with torch.no_grad():
-            for mel,tag in zip(sequences,tags): 
-                print(np.shape(mel))
+            for mel, tag in zip(sequences, tags):
                 mel = np.expand_dims(mel, axis=0)
                 mel = np.swapaxes(mel, 1, 2)
                 mel = torch.tensor(mel)
                 noise = torch.randn([1, 64, mel.shape[-1]])
                 audio = generator.forward(noise, mel)
-                if a.audio_form == ".wav":
-                    audio = audio * MAX_WAV_VALUE
+                #if a.audio_form == ".wav":
+                #    audio = audio * MAX_WAV_VALUE
                 audio = audio.cpu().numpy().astype('int16')
                 output_file = os.path.join(
                     a.output_dir,
@@ -85,6 +87,9 @@ def inference(a, h, with_postnet=False):
                 )
                 write(output_file, h.sampling_rate, audio)
                 print(output_file)
+
+    # Test audio generation by providing path to audio file
+    # Audio path -> mel spectrogram -> generated audio
     else:
         filelist = os.listdir(a.input_wavs_dir)
         with torch.no_grad():
@@ -96,8 +101,10 @@ def inference(a, h, with_postnet=False):
                 audio = torch.FloatTensor(audio)
                 audio = np.array(audio)
 
-                mel = extract_features(a.features, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_ff,
-                                       h.fmin, h.fmax_for_loss, h.num_mels, h.center, h.min_amp, peak_norm=False, preemphasis=0.97)
+                mel = extract_features(a.features, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_ff, h.fmin,
+                                       h.fmax_for_loss, h.num_mels, h.center, h.min_amp, h.with_delta, h.norm_mean,
+                                       h.norm_std_dev, h.random_permute, h.random_state, h.raw_ogg_opts, h.pre_process,
+                                       h.post_process, h.num_channels, h.peak_norm, h.preemphasis, h.join_frames)
                 mel = np.expand_dims(mel, axis=0)
                 mel = np.swapaxes(mel, 1, 2)
                 mel = torch.tensor(mel)

@@ -85,7 +85,11 @@ def train(rank, a, h):
                           h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, split=True, n_cache_reuse=0,
                           shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
                           fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir, features=a.features,
-                          num_mels=h.num_mels, center=h.center, min_amp=h.min_amp)
+                          num_mels=h.num_mels, center=h.center, min_amp=h.min_amp, with_delta=h.with_delta,
+                          norm_mean=h.norm_mean, norm_std_dev=h.norm_std_dev, random_permute=h.random_permute,
+                          random_state=h.random_state, raw_ogg_opts=h.raw_ogg_opts, pre_process=h.pre_process,
+                          post_process=h.post_process, num_channels=h.num_channels, peak_norm=h.peak_norm,
+                          preemphasis=h.preemphasis, join_frames=h.join_frames)
 
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
 
@@ -100,7 +104,12 @@ def train(rank, a, h):
                               h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, False, False, n_cache_reuse=0,
                               fmax_loss=h.fmax_for_loss, device=device, fine_tuning=a.fine_tuning,
                               base_mels_path=a.input_mels_dir, features=a.features, num_mels=h.num_mels,
-                              center=h.center, min_amp=h.min_amp)
+                              center=h.center, min_amp=h.min_amp, with_delta=h.with_delta,
+                              norm_mean=h.norm_mean, norm_std_dev=h.norm_std_dev, random_permute=h.random_permute,
+                              random_state=h.random_state, raw_ogg_opts=h.raw_ogg_opts, pre_process=h.pre_process,
+                              post_process=h.post_process, num_channels=h.num_channels, peak_norm=h.peak_norm,
+                              preemphasis=h.preemphasis, join_frames=h.join_frames)
+
         validation_loader = DataLoader(validset, num_workers=1, shuffle=False,
                                        sampler=None,
                                        batch_size=1,
@@ -136,16 +145,18 @@ def train(rank, a, h):
 
             y_g_hat = generator(z, x)
             
-            # need to pull tensor to cpu and then to gpu again: inefficient?
-            # might need to cut audio at the end due to the fact that the predicted audio might be larger
             y_g_hat_mel = [] 
             for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
                 single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_ff,
-                                              h.fmin, h.fmax_for_loss, h.num_mels, h.center, h.min_amp, peak_norm=False, preemphasis=0.97)
+                                              h.fmin, h.fmax_for_loss, h.num_mels, h.center, h.min_amp, h.with_delta,
+                                              h.norm_mean, h.norm_std_dev, h.random_permute, h.random_state,
+                                              h.raw_ogg_opts, h.pre_process, h.post_process, h.num_channels,
+                                              h.peak_norm, h.preemphasis, h.join_frames)
                 y_g_hat_mel.append(single_mel)
             
             y_g_hat_mel = torch.tensor(y_g_hat_mel)
             y_g_hat_mel = np.swapaxes(y_g_hat_mel, 1, 2)
+            
             # pull to gpu
             y_g_hat_mel = y_g_hat_mel.to("cuda:0")
             if steps > h.disc_start_step:
@@ -228,7 +239,12 @@ def train(rank, a, h):
                             for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
                                 single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
                                                               h.hop_size, h.num_ff, h.fmin, h.fmax_for_loss, h.num_mels,
-                                                              h.center, h.min_amp, peak_norm=False, preemphasis=0.97)
+                                                              h.center, h.min_amp, h.with_delta, h.norm_mean,
+                                                              h.norm_std_dev, h.random_permute, h.random_state,
+                                                              h.raw_ogg_opts, h.pre_process, h.post_process,
+                                                              h.num_channels, h.peak_norm, h.preemphasis,
+                                                              h.join_frames)
+
                                 y_g_hat_mel.append(single_mel)
                             y_g_hat_mel = torch.tensor(np.swapaxes(y_g_hat_mel, 1, 2))
                             y_g_hat_mel = y_g_hat_mel.to("cuda:0")
@@ -245,7 +261,11 @@ def train(rank, a, h):
                                 for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
                                     single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
                                                                   h.hop_size, h.num_ff, h.fmin, h.fmax_for_loss,
-                                                                  h.num_mels, h.center, h.min_amp, peak_norm=False, preemphasis=0.97)
+                                                                  h.num_mels, h.center, h.min_amp, h.with_delta,
+                                                                  h.norm_mean, h.norm_std_dev, h.random_permute,
+                                                                  h.random_state, h.raw_ogg_opts, h.pre_process,
+                                                                  h.post_process, h.num_channels, h.peak_norm,
+                                                                  h.preemphasis, h.join_frames)
                                     y_hat_spec.append(single_mel)
                                 y_hat_spec = torch.tensor(np.swapaxes(y_hat_spec, 1, 2))
                                 sw.add_figure('generated/y_hat_spec_{}'.format(j),
@@ -289,7 +309,7 @@ def main():
                         help='choose features from "mfcc", "log_mel_filterbank", "log_log_mel_filterbank", '
                              '"db_mel_filterbank", "linear_spectrogram"')
     parser.add_argument('--target_audio_form', default='.ogg', help="choose target audio representation to load the "
-                                                                    "audio data for training (wav,ogg...)")
+                                                                    "audio data for training (.wav, .ogg...)")
     a = parser.parse_args()
 
     with open(a.config) as f:
