@@ -2,6 +2,8 @@ import itertools
 import numpy as np
 import os
 import time
+import tempfile
+import shutil
 import argparse
 import json
 import torch
@@ -12,7 +14,7 @@ import torch.multiprocessing as mp
 from torch.distributed import init_process_group
 from torch.nn.parallel import DistributedDataParallel
 from utils import AttrDict, build_env
-from meldataset_full import MelDataset, get_dataset_filelist, extract_features
+from meldataset import MelDataset, get_dataset_filelist, extract_features
 from generator import UnivNet
 from discriminator import MultiPeriodDiscriminator, MultiResSpecDiscriminator
 from loss import feature_loss, generator_loss, discriminator_loss
@@ -79,8 +81,12 @@ def train(rank, a, h):
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=h.lr_decay, last_epoch=last_epoch)
     scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=h.lr_decay, last_epoch=last_epoch)
 
-    training_filelist, validation_filelist = get_dataset_filelist(a, a.target_audio_form)
+    # create temporary directory and copy audio files    
+    tmpdir = tempfile.TemporaryDirectory()
+    shutil.copytree(a.input_audio_dir, tmpdir.name, dirs_exist_ok=True)
 
+    training_filelist, validation_filelist = get_dataset_filelist(a, tmpdir.name)
+   
     trainset = MelDataset(a.target_audio_form, training_filelist, h.segment_size, h.num_ff,
                           h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, split=True, n_cache_reuse=0,
                           shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
@@ -126,6 +132,8 @@ def train(rank, a, h):
     print("Training with {} features".format(a.features))
 
     for epoch in range(max(0, last_epoch), a.training_epochs):
+        print("current rank:", rank)
+        print("current process:", os.getpid())
         if rank == 0:
             start = time.time()
             print("Epoch: {}".format(epoch + 1))
@@ -323,6 +331,7 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed(h.seed)
         h.num_gpus = torch.cuda.device_count()
+        print('CUDA device count:', torch.cuda.device_count())
         h.batch_size = int(h.batch_size / h.num_gpus)
         print('Batch size per GPU :', h.batch_size)
     else:
