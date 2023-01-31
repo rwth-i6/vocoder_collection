@@ -1,0 +1,82 @@
+data: # root path of train/validation data (either relative/absoulte path is ok)
+  input_files: '/work/asr3/rossenbach/schuemann/vocoder/train-clean-100'
+  validation_files: '/work/asr3/rossenbach/schuemann/vocoder/libri_dev_files'
+  train_files: '/work/asr3/rossenbach/schuemann/vocoder/libri_training_files'
+  mel_path: 'H:\Deepsync\backup\fastspeech\data\mels'
+  eval_path: ''
+---
+train:
+  rep_discriminator: 1
+  discriminator_train_start_steps: 100000
+  num_workers: 16
+  batch_size: 96
+  optimizer: 'adam'
+  adam:
+    lr: 0.0002
+    beta1: 0.8
+    beta2: 0.99
+    lr_decay: 0.999
+---
+audio:
+  features: "db_mel_filterbank" # choose features from "mfcc", "log_mel_filterbank", "log_log_mel_filterbank",
+                                # "db_mel_filterbank", "linear_spectrogram"
+  number_feature_filters: 80
+  segment_length: 8000
+  pad_short: 2000
+  filter_length: 1024
+  step_length: 0.0125
+  win_length: 0.05
+  sampling_rate: 16000
+  mel_fmin: 60.0
+  mel_fmax: 7600.0
+  center: False
+  min_amp: 0.0000000001 #1e-10
+  with_delta: False
+  norm_mean: -76.49054107666015
+  norm_std_dev: 30.89699692930349
+  random_permute: null
+  random_state: null
+  raw_ogg_opts: null
+  pre_process: null
+  post_process: null
+  num_channels: null
+  peak_norm: False
+  preemphasis: 0.97
+  join_frames: null
+  num_mels: null
+  audio_form: ".ogg" # choose audio format to load (.ogg, .wav ...)
+
+---
+model:
+  feat_match: 10.0
+  lambda_adv: 1
+  lambda_mel: 45
+  use_subband_stft_loss: False
+  feat_loss: True
+  out_channels: 1
+  generator_ratio: [5, 5, 2, 2, 2] #doesn't do anything
+  mult: 256
+  n_residual_layers: 4
+  num_D : 3
+  ndf : 16
+  n_layers: 3
+  downsampling_factor: 4
+  disc_out: 512
+  
+stft_loss_params:
+    fft_sizes: [1024, 2048, 512]  # List of FFT size for STFT-based loss.
+    hop_sizes: [120, 240, 50]     # List of hop size for STFT-based loss
+    win_lengths: [600, 1200, 240] # List of window length for STFT-based loss.
+    window: "hann_window"         # Window function for STFT-based loss
+subband_stft_loss_params:
+  fft_sizes: [384, 683, 171]  # List of FFT size for STFT-based loss.
+  hop_sizes: [30, 60, 10]     # List of hop size for STFT-based loss
+  win_lengths: [150, 300, 60] # List of window length for STFT-based loss.
+  window: "hann_window"       # Window function for STFT-based loss
+---
+log:
+  summary_interval: 1
+  validation_interval: 5
+  save_interval: 20
+  chkpt_dir: 'chkpt'
+  log_dir: 'logs'
