@@ -15,6 +15,8 @@ from scipy.io.wavfile import write
 from meldataset import MAX_WAV_VALUE, extract_features
 from generator import UnivNet as Generator
 from utils import HParam, AttrDict, build_env
+import returnn.__main__ as rnn
+
 sys.path.append("/u/schuemann/experiments/tts_asr_2021/recipe/returnn_new")
 h = None
 device = None
@@ -59,7 +61,7 @@ def load_normal_data(hdf):
 def inference(a, h, with_postnet=False):
     generator = Generator(h).to(device)
 
-    state_dict_g = load_checkpoint(a.checkpoint_file, device)
+    state_dict_g = load_checkpoint(a.checkpoint_path, device)
     generator.load_state_dict(state_dict_g['generator'])
 
     os.makedirs(a.output_dir, exist_ok=True)
@@ -78,12 +80,13 @@ def inference(a, h, with_postnet=False):
                 mel = torch.tensor(mel)
                 noise = torch.randn([1, 64, mel.shape[-1]])
                 audio = generator.forward(noise, mel)
-                #if a.audio_form == ".wav":
-                #    audio = audio * MAX_WAV_VALUE
+                if a.audio_form == ".wav":
+                    audio = audio * MAX_WAV_VALUE
                 audio = audio.cpu().numpy().astype('int16')
+                segment_length = float(np.shape(audio)[2])/float(h.sampling_rate)
                 output_file = os.path.join(
                     a.output_dir,
-                    tag.split("/")[-1] + a.audio_form
+                    (str(segment_length) + "_" + tag + a.audio_form).replace("/","_")
                 )
                 write(output_file, h.sampling_rate, audio)
                 print(output_file)
@@ -127,7 +130,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input_wavs_dir', default='test_files')
     parser.add_argument('--output_dir', default='generated_files')
-    parser.add_argument('--checkpoint_file', required=True)
+    parser.add_argument('--checkpoint_path', required=True)
     parser.add_argument('--config', default='config_univ.json')
     parser.add_argument('--features', default='db_mel_filterbank',
                         help='choose features from "mfcc", "log_mel_filterbank", "log_log_mel_filterbank", '
@@ -148,7 +151,7 @@ def main():
     device = torch.device('cpu')
 
     inference(args, h)
-
+    rnn.finalize()
 
 if __name__ == '__main__':
     main()
