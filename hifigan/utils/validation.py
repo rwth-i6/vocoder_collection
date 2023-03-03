@@ -22,10 +22,6 @@ def validate(hp, generator, discriminator, model_d_mpd, valloader, stft_loss, l1
         # generator
         fake_audio = generator(mel)  # B, 1, T' torch.Size([1, 1, 212992])
 
-        print("real audio shape in val")
-        print(np.shape(audio))
-        print("fake audio shape in val")
-        print(np.shape(fake_audio))
         # STFT and Mel Loss
         sc_loss, mag_loss = stft_loss(fake_audio[:, :, :audio.size(2)].squeeze(1), audio.squeeze(1))
         loss_g = sc_loss + mag_loss
@@ -46,9 +42,6 @@ def validate(hp, generator, discriminator, model_d_mpd, valloader, stft_loss, l1
         mel_fake = np.swapaxes(mel_fake, 0, 1)
         mel_fake = np.expand_dims(mel_fake, axis=0)
         mel_fake = torch.tensor(mel_fake)
-        print("fake mel shape and real mel and types in validation")
-        print(np.shape(mel_fake))
-        print(np.shape(mel))
         loss_mel = l1loss(mel[:, :, :mel_fake.size(2)], mel_fake.cuda())
         loss_g += hp.model.lambda_mel * loss_mel
         # MSD Losses

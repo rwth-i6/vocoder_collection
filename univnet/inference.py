@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import glob
+import subprocess
 import sys
 import numpy as np
 import os
@@ -35,6 +36,20 @@ def scan_checkpoint(cp_dir, prefix):
     if len(cp_list) == 0:
         return ''
     return sorted(cp_list)[-1]
+
+def save_ogg(wav, path, sr):
+    """
+
+    :param wav:
+    :param path:
+    :param sr:
+    :return:
+    """
+    p1 = subprocess.Popen(["ffmpeg", "-y", "-f", "s16le", "-ar", "%i" % sr, "-i", "pipe:0", path],
+                          stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE)
+    p1.communicate(input=wav.astype(np.int16).tobytes())
+    p1.terminate()
 
 # load hdf data
 def load_normal_data(hdf):
@@ -80,15 +95,17 @@ def inference(a, h, with_postnet=False):
                 mel = torch.tensor(mel)
                 noise = torch.randn([1, 64, mel.shape[-1]])
                 audio = generator.forward(noise, mel)
-                if a.audio_form == ".wav":
-                    audio = audio * MAX_WAV_VALUE
+                audio = audio * MAX_WAV_VALUE
                 audio = audio.cpu().numpy().astype('int16')
                 segment_length = float(np.shape(audio)[2])/float(h.sampling_rate)
                 output_file = os.path.join(
                     a.output_dir,
                     (str(segment_length) + "_" + tag + a.audio_form).replace("/","_")
                 )
-                write(output_file, h.sampling_rate, audio)
+                if a.audio_form == ".wav":
+                    write(output_file, h.sampling_rate, audio)
+                else:
+                    save_ogg(audio, output_file, h.sampling_rate)
                 print(output_file)
 
     # Test audio generation by providing path to audio file
@@ -135,7 +152,7 @@ def main():
     parser.add_argument('--features', default='db_mel_filterbank',
                         help='choose features from "mfcc", "log_mel_filterbank", "log_log_mel_filterbank", '
                              '"db_mel_filterbank", "linear_spectrogram"')
-    parser.add_argument('--audio_form', default='.wav', help="choose audio representation to safe the "
+    parser.add_argument('--audio_form', default='.ogg', help="choose audio representation to safe the "
                                                              "audio data (wav,ogg...)")
     parser.add_argument('--hdf', default=None, help="choose hdf as mel input instead")
     args = parser.parse_args()

@@ -100,18 +100,13 @@ def train(args, pt_dir, chkpt_path, trainloader, valloader, writer, logger, hp, 
                 optim_g.zero_grad()
                 fake_audio = model_g(melG)  # torch.Size([16, 1, 12800])
                 
-                print("real audio shape in training:")
-                print(np.shape(audioG))
-                print("resulting mel")
-                print(np.shape(melG))
-                print("fake audio shape in training:")
-                print(np.shape(fake_audio))
                 fake_audio = fake_audio[:, :, :hp.audio.segment_length]
                 loss_g = 0.0
-
                 sc_loss, mag_loss = stft_loss(fake_audio[:, :, :audioG.size(2)].squeeze(1), audioG.squeeze(1))
                 loss_g += sc_loss + mag_loss # STFT Loss
-
+                print("sc and mag losses:")
+                print(sc_loss)
+                print(mag_loss)
                 adv_loss = 0.0
                 loss_mel = 0.0
                 if step > hp.train.discriminator_train_start_steps:
@@ -133,7 +128,8 @@ def train(args, pt_dir, chkpt_path, trainloader, valloader, writer, logger, hp, 
                         adv_mpd_loss = criterion(score_fake, torch.ones_like(score_fake))
                     adv_mpd_loss = adv_mpd_loss / len(mpd_fake_scores)
                     adv_loss = adv_loss + adv_mpd_loss # Adv Loss
-
+                    print("gen adv loss")
+                    print(adv_loss)
                     # Mel Loss
                     #mel_fake = stft.mel_spectrogram(fake_audio.squeeze(1), requires_grad=True)
                     mel_fake = []
@@ -150,13 +146,11 @@ def train(args, pt_dir, chkpt_path, trainloader, valloader, writer, logger, hp, 
                      
                     mel_fake = np.swapaxes(mel_fake, 1, 2)
                     mel_fake = torch.tensor(mel_fake)
-                    print("fake mel shape in training")
-                    print(np.shape(mel_fake))
-                    print("real mel shape (approximated during training)")
-                    print(np.shape(melG)) 
                     loss_mel += l1loss(melG[:, :, :mel_fake.size(2)], mel_fake.cuda()) # Mel L1 loss
+                    print("l1 mel loss")
+                    print(loss_mel)
                     loss_g += hp.model.lambda_mel * loss_mel
-
+                    
                     if hp.model.feat_loss:
                         for feats_fake, feats_real in zip(disc_fake_feats, disc_real_feats):
                             for feat_f, feat_r in zip(feats_fake, feats_real):
@@ -200,7 +194,8 @@ def train(args, pt_dir, chkpt_path, trainloader, valloader, writer, logger, hp, 
                             loss_mpd_fake = criterion(score_fake, torch.zeros_like(score_fake))
                         loss_mpd = (loss_mpd_fake + loss_mpd_real)/len(mpd_real_scores) # MPD Loss
                         loss_d += loss_mpd
-
+                        print('disc adv loss:')
+                        print(loss_d)
                         loss_d.backward()
                         optim_d.step()
                         loss_d_sum += loss_mpd
