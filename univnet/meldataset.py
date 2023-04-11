@@ -1,7 +1,9 @@
+import logging
 import math
 import os
 import random
 import torch
+import tempfile
 import torch.utils.data
 import soundfile as sf
 import numpy as np
@@ -80,19 +82,23 @@ def extract_features(feature_name, audio, sr, win_size, hop_size, num_ff, f_min,
     return feature_data
 
 
-def get_dataset_filelist(a, audio_form):
+def get_dataset_filelist(a, tmpdir):
     with open(a.input_training_file, 'r', encoding='utf-8') as fi:
-        training_files = [os.path.join(a.input_audio_dir, x.split('|')[0] + audio_form)
+        training_files = [os.path.join(tmpdir, x.split('|')[0] + a.target_audio_form)
                           for x in fi.read().split('\n') if len(x) > 0]
 
     with open(a.input_validation_file, 'r', encoding='utf-8') as fi:
-        validation_files = [os.path.join(a.input_audio_dir, x.split('|')[0] + audio_form)
+        validation_files = [os.path.join(tmpdir, x.split('|')[0] + a.target_audio_form)
                             for x in fi.read().split('\n') if len(x) > 0]
     return training_files, validation_files
 
+def shuffle_unison(a, b):
+    assert len(a) == len(b)
+    p = np.random.permutation(len(a))
+    return np.array(a)[p], np.array(b)[p]
 
 class MelDataset(torch.utils.data.Dataset):
-    def __init__(self, audio_form, training_files, segment_size, num_ff,
+    def __init__(self, hdf_seq, hdf_tag, audio_form, training_files, segment_size, num_ff,
                  hop_size, win_size, sampling_rate,  fmin=60, fmax=7600, split=True, shuffle=True,
                  n_cache_reuse=1, device=None, fmax_loss=None, fine_tuning=False, base_mels_path=None,
                  features="db_mel_filterbank", center=False, num_mels=128, min_amp=1e-10, with_delta=False,
@@ -102,9 +108,11 @@ class MelDataset(torch.utils.data.Dataset):
 
         self.audio_files = training_files
         # shuffle audio based on random seed if shuffle=True
-        random.seed(1234)
+        self.hdf_tag = np.array(hdf_tag)
+        self.indices = np.array(np.argsort(hdf_tag)) 
         if shuffle:
-            random.shuffle(self.audio_files)
+            self.indices, self.audio_files = shuffle_unison(self.indices, self.audio_files)
+        self.hdf_seq = hdf_seq
         self.segment_size = segment_size
         self.sampling_rate = sampling_rate
         self.audio_form = audio_form
@@ -152,25 +160,45 @@ class MelDataset(torch.utils.data.Dataset):
             audio = self.cached_wav
             self._cache_ref_count -= 1
 
-        audio = torch.FloatTensor(audio)
+        audio = torch.FloatTensor(audio) 
         audio = audio.unsqueeze(0)
-
+        audio_start = 0
+        mel_pad = None
+        # fit audio to predicted spectrograms without preprocess padding of audio as in extract_features()
+        if self.hdf_seq is not None:
+            audio = audio[:, 300:-300] 
         if not self.fine_tuning:
             if self.split:
+                # if hdf available, calculate mel length based on splitted audio and random audio start
+                # otherwise just do feature extraction online based on splitted audio
                 if audio.size(1) >= self.segment_size:
                     max_audio_start = audio.size(1) - self.segment_size
                     audio_start = random.randint(0, max_audio_start)
+                    #logging.error(np.shape(audio))
+                    #logging.error(audio_start)
+                    #logging.error(audio_start + self.segment_size)
                     audio = audio[:, audio_start:audio_start+self.segment_size]
                 else:
                     audio = torch.nn.functional.pad(audio, (0, self.segment_size - audio.size(1)), 'constant')
-            
-            # compute mels for training
-            mel = extract_features(self.features, np.array(audio.squeeze()), self.sampling_rate, self.win_size,
-                                   self.hop_size, self.num_ff, self.fmin, self.fmax, self.num_mels, self.center,
-                                   self.min_amp, self.with_delta, self.norm_mean, self.norm_std_dev,
-                                   self.random_permute, self.random_state, self.raw_ogg_opts, self.pre_process,
-                                   self.post_process, self.num_channels, self.peak_norm, self.preemphasis,
-                                   self.join_frames)
+                if self.hdf_seq is not None:
+                    assert filename.split("/")[4] == self.hdf_tag[self.indices[index]].split("/")[1], filename
+                    mel_start = audio_start // int(self.hop_size * self.sampling_rate)
+                    mel_end = (audio_start + self.segment_size) // int(self.hop_size * self.sampling_rate)
+                    #logging.error(np.shape(self.hdf_seq[self.indices[index]]))
+                    #logging.error(np.shape(mel_start))
+                    #logging.error(np.shape(mel_end))
+                    mel = self.hdf_seq[self.indices[index]][mel_start:mel_end]
+
+            else:
+                if self.hdf_seq is not None:
+                    mel = self.hdf_seq[self.indices[index]]
+            if self.hdf_seq is None:
+                mel = extract_features(self.features, np.array(audio.squeeze()), self.sampling_rate, self.win_size,
+                                       self.hop_size, self.num_ff, self.fmin, self.fmax, self.num_mels, self.center,
+                                       self.min_amp, self.with_delta, self.norm_mean, self.norm_std_dev,
+                                       self.random_permute, self.random_state, self.raw_ogg_opts, self.pre_process,
+                                       self.post_process, self.num_channels, self.peak_norm, self.preemphasis,
+                                       self.join_frames)
             mel = np.swapaxes(mel, 0, 1)
             mel = np.expand_dims(mel, axis=0)
             
@@ -194,12 +222,22 @@ class MelDataset(torch.utils.data.Dataset):
                     audio = torch.nn.functional.pad(audio, (0, self.segment_size - audio.size(1)), 'constant')
 
         # compute mels for loss computation
-        mel_loss = extract_features(self.features, np.array(audio.squeeze()), self.sampling_rate, self.win_size,
-                                    self.hop_size, self.num_ff, self.fmin, self.fmax_loss, self.num_mels, self.center,
-                                    self.min_amp, self.with_delta, self.norm_mean, self.norm_std_dev,
-                                    self.random_permute, self.random_state, self.raw_ogg_opts, self.pre_process,
-                                    self.post_process, self.num_channels, self.peak_norm, self.preemphasis,
-                                    self.join_frames)
+        if self.split:
+            if self.hdf_seq is not None:
+                mel_start = audio_start // int(self.hop_size * self.sampling_rate)
+                mel_end = (audio_start + self.segment_size) // int(self.hop_size * self.sampling_rate)
+                mel_loss = self.hdf_seq[self.indices[index]][mel_start:mel_end]
+
+        else:
+            if self.hdf_seq is not None:
+                mel_loss = self.hdf_seq[self.indices[index]]
+        if self.hdf_seq is None:
+            mel_loss = extract_features(self.features, np.array(audio.squeeze()), self.sampling_rate, self.win_size,
+                                        self.hop_size, self.num_ff, self.fmin, self.fmax_loss, self.num_mels,
+                                        self.center, self.min_amp, self.with_delta, self.norm_mean, self.norm_std_dev,
+                                        self.random_permute, self.random_state, self.raw_ogg_opts, self.pre_process,
+                                        self.post_process, self.num_channels, self.peak_norm, self.preemphasis,
+                                        self.join_frames)
 
         mel_loss = np.swapaxes(mel_loss, 0, 1)
         mel_loss = np.expand_dims(mel_loss, axis=0)

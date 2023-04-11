@@ -129,5 +129,7 @@ class MelFromDisk(Dataset):
 
         if self.hp.audio.audio_form == ".wav":
             audio = audio + (1/32768) * torch.randn_like(audio)
+        else:
+            audio = audio * torch.randn_like(audio)
         audio = audio.float()
         return mel, audio
