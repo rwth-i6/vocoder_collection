@@ -166,7 +166,8 @@ class MelDataset(torch.utils.data.Dataset):
         mel_pad = None
         # fit audio to predicted spectrograms without preprocess padding of audio as in extract_features()
         if self.hdf_seq is not None:
-            audio = audio[:, 300:-300] 
+            cut_audio = ((self.sampling_rate * self.win_size) - (self.sampling_rate * self.hop_size))/2
+            audio = audio[:, cut_audio:-cut_audio] 
         if not self.fine_tuning:
             if self.split:
                 # if hdf available, calculate mel length based on splitted audio and random audio start
@@ -174,9 +175,6 @@ class MelDataset(torch.utils.data.Dataset):
                 if audio.size(1) >= self.segment_size:
                     max_audio_start = audio.size(1) - self.segment_size
                     audio_start = random.randint(0, max_audio_start)
-                    #logging.error(np.shape(audio))
-                    #logging.error(audio_start)
-                    #logging.error(audio_start + self.segment_size)
                     audio = audio[:, audio_start:audio_start+self.segment_size]
                 else:
                     audio = torch.nn.functional.pad(audio, (0, self.segment_size - audio.size(1)), 'constant')
@@ -184,9 +182,6 @@ class MelDataset(torch.utils.data.Dataset):
                     assert filename.split("/")[4] == self.hdf_tag[self.indices[index]].split("/")[1], filename
                     mel_start = audio_start // int(self.hop_size * self.sampling_rate)
                     mel_end = (audio_start + self.segment_size) // int(self.hop_size * self.sampling_rate)
-                    #logging.error(np.shape(self.hdf_seq[self.indices[index]]))
-                    #logging.error(np.shape(mel_start))
-                    #logging.error(np.shape(mel_end))
                     mel = self.hdf_seq[self.indices[index]][mel_start:mel_end]
 
             else:
