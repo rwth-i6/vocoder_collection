@@ -1,4 +1,5 @@
 import os
+import logging
 import glob
 import torch
 import random
@@ -40,13 +41,14 @@ def extract_features(feature_name, audio, sr, win_size, hop_size, num_ff, f_min,
     # calculate padding length and pad audio such that features fit to audio in training/validation
     # different padding based on filter length in hifigan
     pad_ff = (sr * win_size)
-
+    pad_hop = (sr * hop_size)
     # make tensor 3D for padding
     audio = torch.tensor(audio).unsqueeze(1)
     if len(np.shape(audio))<3:
         audio = np.swapaxes(audio, 1, 0)
         audio = audio.unsqueeze(0)
-    audio = torch.nn.functional.pad(audio, (int((pad_ff)/2), int((pad_ff)/2)), mode='reflect')
+
+    audio = torch.nn.functional.pad(audio, (int((pad_ff-pad_hop)/2), int((pad_ff-pad_hop)/2)), mode='reflect')
 
     # make audio size suitable for feature extraction in Returnn
     audio = audio.squeeze(0).squeeze(0)
@@ -76,7 +78,7 @@ class MelFromDisk(Dataset):
         self.args = args
         self.train = train
         self.hop_length = int(hp.audio.step_length * hp.audio.sampling_rate)
-        self.mel_segment_length = int(hp.audio.segment_length // self.hop_length + 2)
+        self.mel_segment_length = int(hp.audio.segment_length // self.hop_length)
         self.files = file_list
         self.mapping = [i for i in range(len(self.files))]
 
@@ -87,6 +89,7 @@ class MelFromDisk(Dataset):
     def __getitem__(self, idx):
 
         if self.train:
+            # why choose two and why is first not random on shuffling?
             idx1 = idx
             idx2 = self.mapping[idx1]
             return self.my_getitem(idx1), self.my_getitem(idx2)
@@ -99,6 +102,7 @@ class MelFromDisk(Dataset):
     def my_getitem(self, idx):
         audiopath = self.files[idx]
 
+        # mel_path = "{}/{}.npy".format(self.hp.data.mel_path, id)
         audio, sr = load_audio(audiopath)
         if self.hp.audio.audio_form == ".wav":
             audio = audio/32768.0
@@ -107,6 +111,8 @@ class MelFromDisk(Dataset):
                     mode='constant', constant_values=0.0)
 
         audio = torch.from_numpy(audio).unsqueeze(0)
+        # mel = torch.load(melpath).squeeze(0) # # [num_mel, T]
+        # mel = torch.from_numpy(np.load(mel_path))
         mel = extract_features(self.hp.audio.features, np.array(audio), self.hp.audio.sampling_rate,
                                self.hp.audio.win_length, self.hp.audio.step_length, self.hp.audio.number_feature_filters,
                                self.hp.audio.mel_fmin, self.hp.audio.mel_fmax, self.hp.audio.num_mels,
@@ -116,20 +122,18 @@ class MelFromDisk(Dataset):
                                self.hp.audio.peak_norm, self.hp.audio.preemphasis, self.hp.audio.join_frames)
         mel = np.swapaxes(mel, 0, 1) 
         mel = torch.tensor(mel)        
-        # chooses random length of mel for training - possibly to generate some variation? -> audio is fitted to mel
-        # hop_size = step_len * sampling_rate (conversion from frame-based to time-based)
+        # chooses random length of mel for training ? possibly to generate some variation? -> audio is fitted to mel
+        # hop_size = step_len * sampling_rate ?
         if self.train:
             max_mel_start = mel.size(1) - self.mel_segment_length
             mel_start = random.randint(0, max_mel_start)
             mel_end = int(mel_start + self.mel_segment_length)
+            #logging.error(np.shape(mel))
             mel = mel[:, mel_start:mel_end]
-
             audio_start = mel_start * self.hop_length
-            audio = audio[:, audio_start:audio_start+self.hp.audio.segment_length]
-
+            #logging.error(np.shape(audio))
+            audio = audio[:, audio_start:audio_start+self.hp.audio.segment_length] 
         if self.hp.audio.audio_form == ".wav":
             audio = audio + (1/32768) * torch.randn_like(audio)
-        else:
-            audio = audio * torch.randn_like(audio)
         audio = audio.float()
         return mel, audio
