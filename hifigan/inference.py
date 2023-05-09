@@ -74,8 +74,6 @@ def main(args):
                 audio = audio.clamp(min=-MAX_WAV_VALUE, max=MAX_WAV_VALUE-1)
                 audio = audio.short()
                 audio = audio.cpu().detach().numpy()
-                print(np.shape(audio))
-                print(len(audio))
                 segment_length = float(len(audio))/float(hp.audio.sampling_rate)
                 output_file = os.path.join(
                     args.output_dir,

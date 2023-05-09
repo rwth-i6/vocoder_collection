@@ -62,7 +62,7 @@ class Generator(nn.Module):
             ]
             hu = out
         self.generator = nn.Sequential(*generator)
-
+        self.mel_channel = input_channel
         self.output = nn.Sequential(
             nn.LeakyReLU(0.2),
             nn.ReflectionPad1d(3),

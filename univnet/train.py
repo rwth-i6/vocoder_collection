@@ -18,7 +18,7 @@ from meldataset import MelDataset, get_dataset_filelist, extract_features
 from generator import UnivNet
 from discriminator import MultiPeriodDiscriminator, MultiResSpecDiscriminator
 from loss import feature_loss, generator_loss, discriminator_loss
-from utils import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint
+from utils import plot_spectrogram, scan_checkpoint, load_checkpoint, save_checkpoint, load_normal_data
 from stft_loss import MultiResolutionSTFTLoss
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -86,11 +86,16 @@ def train(rank, a, h):
     shutil.copytree(a.input_audio_dir, tmpdir.name, dirs_exist_ok=True)
 
     training_filelist, validation_filelist = get_dataset_filelist(a, tmpdir.name)
-   
-    trainset = MelDataset(a.target_audio_form, training_filelist, h.segment_size, h.num_ff,
+    
+    if a.hdf_train and a.hdf_val:
+        hdf_seq_t, hdf_tag_t = load_normal_data(a.hdf_train)   
+        hdf_seq_val, hdf_tag_val = load_normal_data(a.hdf_val)
+    else:
+        print("no hdf for training/validation available")
+    trainset = MelDataset(hdf_seq_t, hdf_tag_t, a.target_audio_form, training_filelist, h.segment_size, h.num_ff,
                           h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, split=True, n_cache_reuse=0,
                           shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
-                          fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir, features=a.features,
+                          base_mels_path=a.input_mels_dir, features=a.features,
                           num_mels=h.num_mels, center=h.center, min_amp=h.min_amp, with_delta=h.with_delta,
                           norm_mean=h.norm_mean, norm_std_dev=h.norm_std_dev, random_permute=h.random_permute,
                           random_state=h.random_state, raw_ogg_opts=h.raw_ogg_opts, pre_process=h.pre_process,
@@ -106,9 +111,9 @@ def train(rank, a, h):
                               drop_last=True)
     
     if rank == 0:
-        validset = MelDataset(a.target_audio_form, validation_filelist, h.segment_size, h.num_ff,
+        validset = MelDataset(hdf_seq_val, hdf_tag_val, a.target_audio_form, validation_filelist, h.segment_size, h.num_ff,
                               h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, False, False, n_cache_reuse=0,
-                              fmax_loss=h.fmax_for_loss, device=device, fine_tuning=a.fine_tuning,
+                              fmax_loss=h.fmax_for_loss, device=device,
                               base_mels_path=a.input_mels_dir, features=a.features, num_mels=h.num_mels,
                               center=h.center, min_amp=h.min_amp, with_delta=h.with_delta,
                               norm_mean=h.norm_mean, norm_std_dev=h.norm_std_dev, random_permute=h.random_permute,
@@ -168,7 +173,6 @@ def train(rank, a, h):
             # pull to gpu
             y_g_hat_mel = y_g_hat_mel.to("cuda:0")
             if steps > h.disc_start_step:
-
                 optim_d.zero_grad()
 
                 # MPD
@@ -318,6 +322,9 @@ def main():
                              '"db_mel_filterbank", "linear_spectrogram"')
     parser.add_argument('--target_audio_form', default='.ogg', help="choose target audio representation to load the "
                                                                     "audio data for training (.wav, .ogg...)")
+    parser.add_argument('--hdf_train', help="path to hdf for vocoder training with hdf instead of audio files")
+    parser.add_argument('--hdf_val', help="path to hdf for vocoder training with hdf instead of audio files")
+
     a = parser.parse_args()
 
     with open(a.config) as f:

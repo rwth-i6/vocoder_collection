@@ -1,5 +1,7 @@
 import glob
 import os
+import h5py
+import numpy as np
 import matplotlib
 import torch
 from torch.nn.utils import weight_norm
@@ -163,4 +165,21 @@ def get_padding(kernel_size, dilation=1):
     return int((kernel_size*dilation - dilation)/2)
 
 
-
+def load_normal_data(load_data):
+    input_data = h5py.File(load_data)
+    num_seqs = -1
+    inputs = input_data['inputs']
+    seq_tags = input_data['seqTags']
+    lengths = input_data['seqLengths']
+    sequences = []
+    tags = []
+    offset = 0
+    for tag, length in zip(seq_tags, lengths):
+        tag = tag if isinstance(tag, str) else tag.decode()
+        in_data = inputs[offset:offset + length[0]]
+        sequences.append(in_data)
+        offset += length[0]
+        tags.append(tag)
+        if len(sequences) == num_seqs:
+            break
+    return np.array(sequences), tags
