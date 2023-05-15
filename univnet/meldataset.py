@@ -87,21 +87,12 @@ def extract_features_torch(mel_basis, audio, sr, win_size, hop_size, num_ff, f_m
                      peak_norm=True, preemphasis=None, join_frames=None):
 
     # calculate padding length and pad audio such that features fit to audio in training/validation
-    # different padding based on filter length in hifigan
-    pad_ff = (sr * win_size)
     pad_hop = (sr * hop_size)
-    # make tensor 3D for padding
-    audio = torch.tensor(audio).unsqueeze(1)
-    if len(np.shape(audio))<3:
-        audio = np.swapaxes(audio, 1, 0)
-        audio = audio.unsqueeze(0)
-
+    pad_ff = (sr * win_size)
+    audio = torch.tensor(audio).unsqueeze(0).unsqueeze(0)
     audio = torch.nn.functional.pad(audio, (int((pad_ff-pad_hop)/2), int((pad_ff-pad_hop)/2)), mode='reflect')
+    audio = audio.squeeze(0).squeeze(0) 
 
-    # make audio size suitable for feature extraction in Returnn
-    audio = audio.squeeze(0).squeeze(0)
-    audio = np.array(audio)
-    # add extra feature options and calculate features, extra feature options that are not wanted need to be kept as default option None
     print("using torch feature extraction...")
     S = torch.abs(torch.stft(
         torch.tensor(audio, dtype=torch.float32),
@@ -113,9 +104,12 @@ def extract_features_torch(mel_basis, audio, sr, win_size, hop_size, num_ff, f_m
         pad_mode="constant",
         return_complex=True,
     ))**2
-    feature_data = np.einsum("...ft,mf->...mt", S, mel_basis, optimize=True)
-    log_mel_filterbank = 20 * np.log10(np.maximum(min_amp, feature_data))
-    feature_data = feature_data.transpose().astype("float32")
+    melspec = torch.einsum("...ft,mf->...mt", S.to("cuda"), mel_basis)
+    min_amp = torch.tensor(min_amp).to("cuda")
+    melspec = 20 * torch.log10(torch.max(min_amp, melspec))
+    feature_data = torch.transpose(melspec, 0, 1).float()
+    feature_data = torch.unsqueeze(feature_data, 0)
+    logging.warning(feature_data.shape)
     return feature_data
 
 def get_dataset_filelist(a, tmpdir):
@@ -180,8 +174,8 @@ class MelDataset(torch.utils.data.Dataset):
         self.peak_norm = peak_norm
         self.preemphasis = preemphasis
         self.join_frames = join_frames
-        if mel_basis is not None:
-            self.mel_basis = torch.load(mel_basis)
+        self.mel_basis = mel_basis
+
     def __getitem__(self, index):
         filename = self.audio_files[index]
         if self._cache_ref_count == 0:
