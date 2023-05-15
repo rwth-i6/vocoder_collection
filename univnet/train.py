@@ -14,7 +14,7 @@ import torch.multiprocessing as mp
 from torch.distributed import init_process_group
 from torch.nn.parallel import DistributedDataParallel
 from utils import AttrDict, build_env
-from meldataset import MelDataset, get_dataset_filelist, extract_features
+from meldataset import MelDataset, get_dataset_filelist, extract_features, extract_features_torch
 from generator import UnivNet
 from discriminator import MultiPeriodDiscriminator, MultiResSpecDiscriminator
 from loss import feature_loss, generator_loss, discriminator_loss
@@ -86,7 +86,9 @@ def train(rank, a, h):
     shutil.copytree(a.input_audio_dir, tmpdir.name, dirs_exist_ok=True)
 
     training_filelist, validation_filelist = get_dataset_filelist(a, tmpdir.name)
-    
+    hdf_seq_t = hdf_tag_t = hdf_seq_val = hdf_tag_val = None
+    hdf_tag_t = np.zeros(len(training_filelist)) 
+    hdf_tag_val = np.zeros(len(validation_filelist))
     if a.hdf_train and a.hdf_val:
         hdf_seq_t, hdf_tag_t = load_normal_data(a.hdf_train)   
         hdf_seq_val, hdf_tag_val = load_normal_data(a.hdf_val)
@@ -100,7 +102,7 @@ def train(rank, a, h):
                           norm_mean=h.norm_mean, norm_std_dev=h.norm_std_dev, random_permute=h.random_permute,
                           random_state=h.random_state, raw_ogg_opts=h.raw_ogg_opts, pre_process=h.pre_process,
                           post_process=h.post_process, num_channels=h.num_channels, peak_norm=h.peak_norm,
-                          preemphasis=h.preemphasis, join_frames=h.join_frames)
+                          preemphasis=h.preemphasis, join_frames=h.join_frames, mel_basis = a.mel_basis)
 
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
 
@@ -119,7 +121,7 @@ def train(rank, a, h):
                               norm_mean=h.norm_mean, norm_std_dev=h.norm_std_dev, random_permute=h.random_permute,
                               random_state=h.random_state, raw_ogg_opts=h.raw_ogg_opts, pre_process=h.pre_process,
                               post_process=h.post_process, num_channels=h.num_channels, peak_norm=h.peak_norm,
-                              preemphasis=h.preemphasis, join_frames=h.join_frames)
+                              preemphasis=h.preemphasis, join_frames=h.join_frames, mel_basis = a.mel_basis)
 
         validation_loader = DataLoader(validset, num_workers=1, shuffle=False,
                                        sampler=None,
@@ -133,7 +135,9 @@ def train(rank, a, h):
     mpd.train()
     msd.train()
     stft_loss = MultiResolutionSTFTLoss()
-
+    mel_basis = None    
+    if a.mel_basis is not None:
+        mel_basis = torch.load(a.mel_basis)
     print("Training with {} features".format(a.features))
 
     for epoch in range(max(0, last_epoch), a.training_epochs):
@@ -160,7 +164,14 @@ def train(rank, a, h):
             
             y_g_hat_mel = [] 
             for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
-                single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_ff,
+                if a.mel_basis is None:
+                    single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_ff,
+                                              h.fmin, h.fmax_for_loss, h.num_mels, h.center, h.min_amp, h.with_delta,
+                                              h.norm_mean, h.norm_std_dev, h.random_permute, h.random_state,
+                                              h.raw_ogg_opts, h.pre_process, h.post_process, h.num_channels,
+                                              h.peak_norm, h.preemphasis, h.join_frames)
+                else:
+                    single_mel = extract_features_torch(mel_basis, audio, h.sampling_rate, h.win_size, h.hop_size, h.num_ff,
                                               h.fmin, h.fmax_for_loss, h.num_mels, h.center, h.min_amp, h.with_delta,
                                               h.norm_mean, h.norm_std_dev, h.random_permute, h.random_state,
                                               h.raw_ogg_opts, h.pre_process, h.post_process, h.num_channels,
@@ -249,7 +260,16 @@ def train(rank, a, h):
                             y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
                             y_g_hat_mel = []
                             for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
-                                single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
+                                if a.mel_basis is None:
+                                    single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
+                                                              h.hop_size, h.num_ff, h.fmin, h.fmax_for_loss, h.num_mels,
+                                                              h.center, h.min_amp, h.with_delta, h.norm_mean,
+                                                              h.norm_std_dev, h.random_permute, h.random_state,
+                                                              h.raw_ogg_opts, h.pre_process, h.post_process,
+                                                              h.num_channels, h.peak_norm, h.preemphasis,
+                                                              h.join_frames)
+                                else:
+                                    single_mel = extract_features_torch(mel_basis, audio, h.sampling_rate, h.win_size,
                                                               h.hop_size, h.num_ff, h.fmin, h.fmax_for_loss, h.num_mels,
                                                               h.center, h.min_amp, h.with_delta, h.norm_mean,
                                                               h.norm_std_dev, h.random_permute, h.random_state,
@@ -271,13 +291,22 @@ def train(rank, a, h):
                                
                                 y_hat_spec = []
                                 for audio in y_g_hat.squeeze(1).detach().cpu().numpy():
-                                    single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
+                                    if a.mel_basis is None:
+                                        single_mel = extract_features(a.features, audio, h.sampling_rate, h.win_size,
                                                                   h.hop_size, h.num_ff, h.fmin, h.fmax_for_loss,
                                                                   h.num_mels, h.center, h.min_amp, h.with_delta,
                                                                   h.norm_mean, h.norm_std_dev, h.random_permute,
                                                                   h.random_state, h.raw_ogg_opts, h.pre_process,
                                                                   h.post_process, h.num_channels, h.peak_norm,
                                                                   h.preemphasis, h.join_frames)
+                                    else:
+                                        single_mel = extract_features_torch(mel_basis, audio, h.sampling_rate, h.win_size,
+                                                                  h.hop_size, h.num_ff, h.fmin, h.fmax_for_loss,
+                                                                  h.num_mels, h.center, h.min_amp, h.with_delta,
+                                                                  h.norm_mean, h.norm_std_dev, h.random_permute,
+                                                                  h.random_state, h.raw_ogg_opts, h.pre_process,
+                                                                  h.post_process, h.num_channels, h.peak_norm,
+                                                                  h.preemphasis, h.join_frames) 
                                     y_hat_spec.append(single_mel)
                                 y_hat_spec = torch.tensor(np.swapaxes(y_hat_spec, 1, 2))
                                 sw.add_figure('generated/y_hat_spec_{}'.format(j),
@@ -324,6 +353,7 @@ def main():
                                                                     "audio data for training (.wav, .ogg...)")
     parser.add_argument('--hdf_train', help="path to hdf for vocoder training with hdf instead of audio files")
     parser.add_argument('--hdf_val', help="path to hdf for vocoder training with hdf instead of audio files")
+    parser.add_argument('--mel_basis', help="path to mel_basis for extracting features with torch")
 
     a = parser.parse_args()
 

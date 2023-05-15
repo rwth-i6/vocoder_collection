@@ -1,13 +1,15 @@
 import tqdm
 import torch
-from datasets.dataloader import extract_features
+from datasets.dataloader import extract_features, extract_features_torch
 import numpy as np
 
-def validate(hp, generator, discriminator, model_d_mpd, valloader, stft_loss, l1loss, criterion, writer, step):
+def validate(hp, args, generator, discriminator, model_d_mpd, valloader, stft_loss, l1loss, criterion, writer, step):
     generator.eval()
     discriminator.eval()
     torch.backends.cudnn.benchmark = False
-
+    mel_basis = None
+    if args.mel_basis is not None:
+        mel_basis = torch.load(args.mel_basis)
     loader = tqdm.tqdm(valloader, desc='Validation loop')
     loss_g_sum = 0.0
     loss_d_sum = 0.0
@@ -28,8 +30,8 @@ def validate(hp, generator, discriminator, model_d_mpd, valloader, stft_loss, l1
         
         mel_fake = []    
         #for audio in fake_audio.squeeze().detach().cpu().numpy():
-
-        mel_fake = extract_features(hp.audio.features, fake_audio[:, :, :audio.size(2)].squeeze(1).detach().cpu().numpy(),
+        if mel_basis is not None:
+            mel_fake = extract_features(hp.audio.features, fake_audio[:, :, :audio.size(2)].squeeze(1).detach().cpu().numpy(),
                                            hp.audio.sampling_rate, hp.audio.win_length, hp.audio.step_length,
                                            hp.audio.number_feature_filters, hp.audio.mel_fmin, hp.audio.mel_fmax,
                                            hp.audio.num_mels, hp.audio.center, hp.audio.min_amp,
@@ -37,8 +39,16 @@ def validate(hp, generator, discriminator, model_d_mpd, valloader, stft_loss, l1
                                            hp.audio.random_permute, hp.audio.random_state, hp.audio.raw_ogg_opts,
                                            hp.audio.pre_process, hp.audio.post_process, hp.audio.num_channels,
                                            hp.audio.peak_norm, hp.audio.preemphasis, hp.audio.join_frames)		
-            #mel_fake.append(single_fake_mel)
-	     
+        else:
+            mel_fake = extract_features_torch(mel_basis, fake_audio[:, :, :audio.size(2)].squeeze(1).detach().cpu().numpy(),
+                                           hp.audio.sampling_rate, hp.audio.win_length, hp.audio.step_length,
+                                           hp.audio.number_feature_filters, hp.audio.mel_fmin, hp.audio.mel_fmax,
+                                           hp.audio.num_mels, hp.audio.center, hp.audio.min_amp,
+                                           hp.audio.with_delta, hp.audio.norm_mean, hp.audio.norm_std_dev,
+                                           hp.audio.random_permute, hp.audio.random_state, hp.audio.raw_ogg_opts,
+                                           hp.audio.pre_process, hp.audio.post_process, hp.audio.num_channels,
+                                           hp.audio.peak_norm, hp.audio.preemphasis, hp.audio.join_frames)
+ 
         mel_fake = np.swapaxes(mel_fake, 0, 1)
         mel_fake = np.expand_dims(mel_fake, axis=0)
         mel_fake = torch.tensor(mel_fake)
