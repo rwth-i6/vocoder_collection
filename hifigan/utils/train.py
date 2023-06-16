@@ -3,10 +3,9 @@ import math
 import tqdm
 import torch
 import itertools
-import logging
 import traceback
 from utils.validation import  validate
-from datasets.dataloader import extract_features, extract_features_torch
+from datasets.dataloader import extract_features
 from model.generator import Generator
 from model.multiscale import MultiScaleDiscriminator
 from model.mpd import MPD
@@ -47,9 +46,7 @@ def train(args, pt_dir, chkpt_path, trainloader, valloader, writer, logger, hp, 
 
     init_epoch = -1
     step = 0
-    mel_basis = None
-    if args.mel_basis is not None:
-        mel_basis = torch.load(args.mel_basis)
+
     if chkpt_path is not None:
         logger.info("Resuming from checkpoint: %s" % chkpt_path)
         checkpoint = torch.load(chkpt_path)
@@ -85,7 +82,7 @@ def train(args, pt_dir, chkpt_path, trainloader, valloader, writer, logger, hp, 
         for epoch in itertools.count(init_epoch + 1):
             if epoch % hp.log.validation_interval == 0:
                 with torch.no_grad():
-                    validate(hp, args, model_g, model_d, model_d_mpd, valloader, stft_loss, l1loss, criterion, writer,
+                    validate(hp, model_g, model_d, model_d_mpd, valloader, stft_loss, l1loss, criterion, writer,
                              step)
 
             trainloader.dataset.shuffle_mapping()
@@ -102,14 +99,14 @@ def train(args, pt_dir, chkpt_path, trainloader, valloader, writer, logger, hp, 
                 # generator
                 optim_g.zero_grad()
                 fake_audio = model_g(melG)  # torch.Size([16, 1, 12800])
-                #logging.error("shapes audio:")
-                #logging.error(np.shape(fake_audio))
-                #logging.error(np.shape(audioG))                
+                
                 fake_audio = fake_audio[:, :, :hp.audio.segment_length]
                 loss_g = 0.0
-
                 sc_loss, mag_loss = stft_loss(fake_audio[:, :, :audioG.size(2)].squeeze(1), audioG.squeeze(1))
                 loss_g += sc_loss + mag_loss # STFT Loss
+                print("sc and mag losses:")
+                print(sc_loss)
+                print(mag_loss)
                 adv_loss = 0.0
                 loss_mel = 0.0
                 if step > hp.train.discriminator_train_start_steps:
@@ -131,12 +128,13 @@ def train(args, pt_dir, chkpt_path, trainloader, valloader, writer, logger, hp, 
                         adv_mpd_loss = criterion(score_fake, torch.ones_like(score_fake))
                     adv_mpd_loss = adv_mpd_loss / len(mpd_fake_scores)
                     adv_loss = adv_loss + adv_mpd_loss # Adv Loss
+                    print("gen adv loss")
+                    print(adv_loss)
                     # Mel Loss
                     #mel_fake = stft.mel_spectrogram(fake_audio.squeeze(1), requires_grad=True)
                     mel_fake = []
                     for audio in fake_audio.squeeze(1).detach().cpu().numpy():
-                        if mel_basis is None:
-                            single_fake_mel = extract_features(hp.audio.features, audio,
+                        single_fake_mel = extract_features(hp.audio.features, audio,
                                                            hp.audio.sampling_rate, hp.audio.win_length, hp.audio.step_length,
                                                            hp.audio.number_feature_filters, hp.audio.mel_fmin, hp.audio.mel_fmax,
                                                            hp.audio.num_mels, hp.audio.center, hp.audio.min_amp,
@@ -144,24 +142,13 @@ def train(args, pt_dir, chkpt_path, trainloader, valloader, writer, logger, hp, 
                                                            hp.audio.random_permute, hp.audio.random_state, hp.audio.raw_ogg_opts,
                                                            hp.audio.pre_process, hp.audio.post_process, hp.audio.num_channels,
                                                            hp.audio.peak_norm, hp.audio.preemphasis, hp.audio.join_frames)
-                        else:
-                            single_fake_mel = extract_features_torch(mel_basis, audio,
-                                                           hp.audio.sampling_rate, hp.audio.win_length, hp.audio.step_length,
-                                                           hp.audio.number_feature_filters, hp.audio.mel_fmin, hp.audio.mel_fmax,
-                                                           hp.audio.num_mels, hp.audio.center, hp.audio.min_amp,
-                                                           hp.audio.with_delta, hp.audio.norm_mean, hp.audio.norm_std_dev,
-                                                           hp.audio.random_permute, hp.audio.random_state, hp.audio.raw_ogg_opts,
-                                                           hp.audio.pre_process, hp.audio.post_process, hp.audio.num_channels,
-                                                           hp.audio.peak_norm, hp.audio.preemphasis, hp.audio.join_frames)
-
                         mel_fake.append(single_fake_mel)
                      
                     mel_fake = np.swapaxes(mel_fake, 1, 2)
                     mel_fake = torch.tensor(mel_fake)
-                    #logging.error("mel sizes:")
-                    #logging.error(np.shape(mel_fake))
-                    #logging.error(np.shape(melG))
                     loss_mel += l1loss(melG[:, :, :mel_fake.size(2)], mel_fake.cuda()) # Mel L1 loss
+                    print("l1 mel loss")
+                    print(loss_mel)
                     loss_g += hp.model.lambda_mel * loss_mel
                     
                     if hp.model.feat_loss:
@@ -207,6 +194,8 @@ def train(args, pt_dir, chkpt_path, trainloader, valloader, writer, logger, hp, 
                             loss_mpd_fake = criterion(score_fake, torch.zeros_like(score_fake))
                         loss_mpd = (loss_mpd_fake + loss_mpd_real)/len(mpd_real_scores) # MPD Loss
                         loss_d += loss_mpd
+                        print('disc adv loss:')
+                        print(loss_d)
                         loss_d.backward()
                         optim_d.step()
                         loss_d_sum += loss_mpd

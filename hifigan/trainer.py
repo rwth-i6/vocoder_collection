@@ -7,7 +7,7 @@ import shutil
 from utils.train import train
 from utils.hparams import HParam
 from utils.writer import MyWriter
-from datasets.dataloader import create_dataloader, get_dataset_filelist, load_normal_data
+from datasets.dataloader import create_dataloader, get_dataset_filelist
 
 
 if __name__ == '__main__':
@@ -18,10 +18,6 @@ if __name__ == '__main__':
                         help="path of checkpoint pt file to resume training")
     parser.add_argument('-n', '--name', type=str, required=True,
                         help="name of the model for logging, saving checkpoint")
-    parser.add_argument('-t', '--hdf_train', help="path to hdf for vocoder training with hdf instead of audio files")
-    parser.add_argument('-v', '--hdf_val', help="path to hdf for vocoder training with hdf instead of audio files")
-    parser.add_argument('-m', '--mel_basis', help="path to mel_basis for extraction with torch")
-
     args = parser.parse_args()
 
     hp = HParam(args.config)
@@ -46,20 +42,17 @@ if __name__ == '__main__':
 
     writer = MyWriter(hp, log_dir)
 
+    # Needs to work with hop size of 0.05
+    # assert hp.audio.hop_length == 256, \
+    #    'hp.audio.hop_length must be equal to 256, got %d' % hp.audio.hop_length
+
     # create temporary directory and copy audio files
     tmpdir = tempfile.TemporaryDirectory()
     shutil.copytree(hp.data.input_files, tmpdir.name, dirs_exist_ok=True)
     print("copied files to:", tmpdir.name)
     training_filelist, validation_filelist = get_dataset_filelist(hp, tmpdir.name)
 
-    # initialize hdf sequences if available
-    hdf_seq_t = hdf_tag_t = hdf_seq_val = hdf_tag_val = None
-    if args.hdf_train and args.hdf_val:
-        hdf_seq_t, hdf_tag_t = load_normal_data(args.hdf_train)
-        hdf_seq_val, hdf_tag_val = load_normal_data(args.hdf_val)
-    else:
-        print("no hdf for training/validation available")
-    trainloader = create_dataloader(hp, args, True, validation_filelist, training_filelist, hdf_seq_t, hdf_tag_t, hdf_seq_val, hdf_tag_val)
-    valloader = create_dataloader(hp, args, False, validation_filelist, training_filelist, hdf_seq_t, hdf_tag_t, hdf_seq_val, hdf_tag_val)
+    trainloader = create_dataloader(hp, args, True, validation_filelist, training_filelist)
+    valloader = create_dataloader(hp, args, False, validation_filelist, training_filelist)
 
     train(args, pt_dir, args.checkpoint_path, trainloader, valloader, writer, logger, hp, hp_str)
